@@ -18,6 +18,12 @@ test = ["ruff==0.15.11"]
 Repository = "https://github.com/znzsofficial/neko-proactive-mai"
 Issues = "https://github.com/znzsofficial/neko-proactive-mai/issues"
 
+[tool.setuptools]
+# This is a MaiBot plugin flat layout, not a distributable Python package.
+# Keep editable installation for dependency setup without auto-discovering each
+# top-level plugin/test module as a separate package.
+py-modules = []
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
