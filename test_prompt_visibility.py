@@ -40,7 +40,8 @@ class PromptVisibilityTests(unittest.TestCase):
 
     def test_other_plugins_quotes_roles_media_and_malformed_preserved(self):
         latest = item(task(1791900001000))
-        mixed = item(task(1791900000000));mixed['parts'].append({'type': 'image', 'image_base64': 'kept'})
+    mixed = item(task(1791900000000))
+    mixed['parts'].append({'type': 'image', 'image_base64': 'kept'})
         keep = [item(task(1791900000000, 'other-plugin')),
                 item('用户引用：\n' + task(1791900000000)),
                 item(task(1791900000000), 'AssistantMessageItem'),
