@@ -27,20 +27,30 @@ class PluginSection(PluginConfigBase):
 
 class SchedulerSection(PluginConfigBase):
     """调度器设置——控制何时、多久触发一次主动注入。"""
+
     enabled: bool = Field(default=True, description="是否开启主动聊天")
     start_time: str = Field(default="08:00", description="每日开始时间 (HH:MM)")
     end_time: str = Field(default="23:00", description="每日结束时间 (HH:MM)")
     check_interval: int = Field(default=30, description="检查间隔（分钟）")
     jitter: int = Field(default=5, description="间隔波动（分钟）")
     probability: float = Field(default=0.2, description="触发概率 0~1")
-    min_interval_between_chats: int = Field(default=60, description="两次主动聊天最小间隔（分钟）")
-    isolation_time: int = Field(default=15, description="距上次真人消息至少静默多少分钟才触发")
+    min_interval_between_chats: int = Field(
+        default=60, description="两次主动聊天最小间隔（分钟）"
+    )
+    isolation_time: int = Field(
+        default=15, description="距上次真人消息至少静默多少分钟才触发"
+    )
 
 
 class TargetSection(PluginConfigBase):
     """白名单——只对指定的群/用户生效。"""
-    allowed_groups: List[str] = Field(default_factory=list, description="白名单群号列表")
-    allowed_friends: List[str] = Field(default_factory=list, description="白名单QQ号列表")
+
+    allowed_groups: List[str] = Field(
+        default_factory=list, description="白名单群号列表"
+    )
+    allowed_friends: List[str] = Field(
+        default_factory=list, description="白名单QQ号列表"
+    )
 
 
 class LogSection(PluginConfigBase):
@@ -50,22 +60,24 @@ class LogSection(PluginConfigBase):
 
 class IntentSection(PluginConfigBase):
     """主动触发时注入 Planner 的意图描述。"""
+
     group_text: str = Field(
         default=GROUP_PROACTIVE_INTENT,
-        description="群聊主动发言意图，默认普通冷场找话题；空白时也使用群聊默认，不沿用私聊意图"
+        description="群聊主动发言意图，默认普通冷场找话题；空白时也使用群聊默认，不沿用私聊意图",
     )
     private_text: str = Field(
         default=PRIVATE_PROACTIVE_INTENT,
-        description="私聊主动发言意图：日常分享、旧事追问、早安/叫起床；空白时使用私聊默认"
+        description="私聊主动发言意图：日常分享、旧事追问、早安/叫起床；空白时使用私聊默认",
     )
     reason: str = Field(
-        default="attention_proactive",
-        description="触发原因标识，用于日志和去重"
+        default="attention_proactive", description="触发原因标识，用于日志和去重"
     )
 
 
 class LifeSection(PluginConfigBase):
-    enabled: bool = Field(default=False, description='通过签名接口获取Life公开见闻；失败仍按原流程聊天')
+    enabled: bool = Field(
+        default=False, description="通过签名接口获取Life公开见闻；失败仍按原流程聊天"
+    )
 
 
 class LonelyMaiConfig(PluginConfigBase):

@@ -179,7 +179,9 @@ class LifeBridge:
         if (
             sent is not True
             or not isinstance(task, str)
-            or not task.startswith(("proactive:neko.proactive:", "proactive:attention-seeker-mai:"))
+            or not task.startswith(
+                ("proactive:neko.proactive:", "proactive:attention-seeker-mai:")
+            )
         ):
             return
         async with self.lock:
