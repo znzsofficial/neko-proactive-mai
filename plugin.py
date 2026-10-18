@@ -68,7 +68,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         async with self._lifecycle_lock:
             await self._stop_scheduler()
-        self.ctx.logger.info("LonelyMai 已卸载")
+        self.ctx.logger.info("Neko Proactive Mai 已卸载")
 
     async def on_config_update(self, *args, **kwargs):
         del args, kwargs
@@ -85,13 +85,13 @@ class LonelyMaiPlugin(MaiBotPlugin):
         async with self._lifecycle_lock:
             await self._stop_scheduler()
             if not self.config.plugin.enabled or not self.config.scheduler.enabled:
-                self.ctx.logger.info("LonelyMai 调度器已禁用")
+                self.ctx.logger.info("Neko Proactive Mai 调度器已禁用")
                 return
             self._bot_qq = await self._get_global_str("bot.qq_account", "")
             # Keep cooldown state; only the scheduler resolves targets, avoiding
             # concurrent replacement of states during an in-flight trigger.
             self._scheduler_task = asyncio.create_task(self._schedule_loop())
-            self.ctx.logger.info("LonelyMai 调度器已启动")
+            self.ctx.logger.info("Neko Proactive Mai 调度器已启动")
 
     async def _get_global_str(self, key: str, default: str = "") -> str:
         try:
