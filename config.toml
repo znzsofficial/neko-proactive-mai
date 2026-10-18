@@ -1,0 +1,27 @@
+[plugin]
+enabled = false
+config_version = "2.0.0"
+version = "2.0.4"
+
+[scheduler]
+enabled = true
+start_time = "08:00"
+end_time = "23:00"
+check_interval = 30
+jitter = 3
+probability = 0.7
+min_interval_between_chats = 60
+isolation_time = 0
+
+[target]
+allowed_groups = []
+allowed_friends = ["12345678"]
+
+[log]
+verbose = true
+scheduler_log = true
+
+[intent]
+group_text = "群聊冷场了，主动找个话题聊聊"
+private_text = "想找对方聊两句，可以分享自己的日常、感受或小计划，也可以顺着前面确实聊过、还没结束的事，问一句后来怎么样了。早晨可以照常说早安、问醒了没，或按约定叫起床。结合时间和最近对话选一个自然的话头，不机械查岗、不重复追问已回答的事，不必以问题收尾。已经在聊就顺着接，没合适的话想说时可以暂时不发。"
+reason = "attention_proactive"
