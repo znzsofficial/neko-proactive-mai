@@ -40,9 +40,7 @@ class PromptVisibilityTests(unittest.TestCase):
 
     def test_timestamp_not_accidental_list_order(self):
         newest, older = item(task(1791900001000)), item(task(1791900000000))
-        self.assertEqual(
-            filter_request({"items": [newest, older]})[0]["items"], [newest]
-        )
+        self.assertEqual(filter_request({"items": [newest, older]})[0]["items"], [newest])
 
     def test_duplicate_latest_keeps_last(self):
         a, b = item(task(1791900001000)), item(task(1791900001000))

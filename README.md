@@ -93,7 +93,25 @@ Maisaka Planner 收到意图 → 基于人格/记忆/上下文/工具
 
 ## 手动触发
 
-在已注册的白名单会话中发送 `/saymai`，立即触发同一份意图注入。当前实现绕过自动调度的时间范围、概率、最小间隔和隔离期；不绕过白名单，也不保证Planner一定发言。命令没有新增发送者管理员鉴权。
+在已注册的白名单会话中发送 `/saymai`，立即触发同一份意图注入。当前实现绕过自动调度的时间范围、概率、最小间隔和隔离期（包括scheduler.enabled=false）；不绕过plugin.enabled总开关或当前群/好友白名单，也不保证Planner一定发言。命令没有新增发送者管理员鉴权。
+
+缓存会话不是授权依据：入口和Life异步查询结束后都会检查当前配置，撤权立即阻止尚未提交的Host调用，不清除合法会话冷却。已经提交到Host的请求无法撤回。
+仅Host明确返回`success=true`才记为注入成功并更新自动调度冷却；显式拒绝、异常、非协议/未知返回均向命令报告失败，不消耗成功冷却。Life候选在拒绝或未知结果时保守记为unknown，不释放后补发；回执重试只结算，不重发内容。重复receipt不能覆盖原outbox。
+
+## 回归与CI
+
+安装`python -m pip install -e ".[test]" tzdata`，运行：
+
+```sh
+python scripts/check_tests.py
+python -m ruff check .
+python -m ruff format --check .
+python scripts/check_archive.py
+```
+
+当前35项测试（原24项加11项）使用真实SDK及Mock Host/Life，不接触线上配置/服务。
+门禁要求至少35项且零skip；CI覆盖Windows/Linux × Python3.12/3.14 × SDK2.12.0/最新兼容2.x共8档，显式安装tzdata并检查依赖。
+Actions固定为GitHub API核实的提交SHA。仓库没有发布器；归档烟测仅在临时目录构建/解压源码zip，检查manifest与真实SDK插件工厂加载，排除config.toml、密钥、outbox，不新建发布/部署流水线。
 
 # 行为边界
 

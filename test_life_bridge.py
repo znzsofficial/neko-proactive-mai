@@ -106,3 +106,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):
             await self.bridge.call("claim", {"session_id": "chat"})
         self.context.call_capability.assert_not_awaited()
+
+    async def test_unknown_receipt_is_not_reclaimed_or_overwritten(self):
+        await self.claim()
+        await self.bridge.update("a" * 32, "unknown")
+        before = self.bridge.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "duplicate_receipt"):
+            await self.claim()
+        self.assertEqual(self.bridge.path.read_bytes(), before)
+
+    async def test_failed_unknown_ack_only_retries_receipt(self):
+        await self.claim()
+        self.context.call_capability.side_effect = TimeoutError
+        with self.assertRaises(TimeoutError):
+            await self.bridge.update("a" * 32, "unknown")
+        self.context.call_capability.reset_mock(side_effect=True)
+        self.context.call_capability.return_value = {"success": True}
+        await LifeBridge(self.context).flush()
+        calls = self.context.call_capability.call_args_list
+        self.assertEqual(len(calls), 1)
+        packet = calls[0].kwargs["args"]["packet"]
+        self.assertEqual(packet["operation"], "receipt")
+        self.assertEqual(packet["body"]["status"], "unknown")

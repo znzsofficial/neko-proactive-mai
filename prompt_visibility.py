@@ -35,10 +35,7 @@ def task_timestamp(item, *, legacy=False):
             return None
         text = part["text"]
     # Nested/quoted blocks are not standalone host tasks.
-    if (
-        text.count("<plugin_proactive_task") != 1
-        or text.count("</plugin_proactive_task>") != 1
-    ):
+    if text.count("<plugin_proactive_task") != 1 or text.count("</plugin_proactive_task>") != 1:
         return None
     match = TASK.fullmatch(text)
     return int(match[1]) if match else None
@@ -65,8 +62,6 @@ def filter_request(kwargs):
             continue
         keep = max(owned)[1]
         discard = {index for _, index in owned if index != keep}
-        modified[key] = [
-            item for index, item in enumerate(items) if index not in discard
-        ]
+        modified[key] = [item for index, item in enumerate(items) if index not in discard]
         removed += len(discard)
     return modified, removed

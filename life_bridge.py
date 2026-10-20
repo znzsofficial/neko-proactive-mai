@@ -79,9 +79,7 @@ class LifeBridge:
             separators=(",", ":"),
             allow_nan=False,
         ).encode()
-        packet["signature"] = hmac.new(
-            bytes.fromhex(key), raw, hashlib.sha256
-        ).hexdigest()
+        packet["signature"] = hmac.new(bytes.fromhex(key), raw, hashlib.sha256).hexdigest()
         async with asyncio.timeout(2):
             response = await self.context.call_capability(
                 "api.call",
@@ -119,6 +117,10 @@ class LifeBridge:
             ):
                 raise ValueError("invalid_candidate")
             key = candidate["receipt_id"]
+            if key in rows:
+                # Never turn an uncertain/submitted receipt back into a new send,
+                # even if a repeated claim response returns the same candidate.
+                raise ValueError("duplicate_receipt")
             rows[key] = {
                 "session_id": session,
                 "receipt_id": key,
@@ -138,9 +140,7 @@ class LifeBridge:
             row = rows[receipt]
             if row["status"] == "sent":
                 return
-            row.update(
-                status=status, host_task=task or row["host_task"], acknowledged=False
-            )
+            row.update(status=status, host_task=task or row["host_task"], acknowledged=False)
             await asyncio.to_thread(self._write, rows)
             if status in {"submitted", "unknown", "released", "sent"}:
                 await self._flush_row(row)
@@ -179,17 +179,13 @@ class LifeBridge:
         if (
             sent is not True
             or not isinstance(task, str)
-            or not task.startswith(
-                ("proactive:neko.proactive:", "proactive:attention-seeker-mai:")
-            )
+            or not task.startswith(("proactive:neko.proactive:", "proactive:attention-seeker-mai:"))
         ):
             return
         async with self.lock:
             rows = await asyncio.to_thread(self._read)
             matching = [
-                r
-                for r in rows.values()
-                if r["session_id"] == session and r["host_task"] == task
+                r for r in rows.values() if r["session_id"] == session and r["host_task"] == task
             ]
         if len(matching) == 1:
             await self.update(matching[0]["receipt_id"], "sent", task)

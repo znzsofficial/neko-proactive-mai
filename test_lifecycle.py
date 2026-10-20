@@ -14,9 +14,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         pkg = types.ModuleType("lonely_test")
         pkg.__path__ = [str(root)]
         sys.modules[pkg.__name__] = pkg
-        spec = importlib.util.spec_from_file_location(
-            "lonely_test.plugin", root / "plugin.py"
-        )
+        spec = importlib.util.spec_from_file_location("lonely_test.plugin", root / "plugin.py")
         mod = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)

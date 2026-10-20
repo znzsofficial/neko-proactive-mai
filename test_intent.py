@@ -4,7 +4,7 @@ import sys
 import tomllib
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 @unittest.skipUnless(importlib.util.find_spec("maibot_sdk"), "requires MaiBot SDK")
@@ -27,11 +27,16 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
             ctx = types.SimpleNamespace(
                 logger=Mock(),
                 maisaka=types.SimpleNamespace(
-                    proactive=types.SimpleNamespace(trigger=AsyncMock())
+                    proactive=types.SimpleNamespace(
+                        trigger=AsyncMock(return_value={"success": True})
+                    )
                 ),
             )
 
         self.bot = Bot()
+        self.bot.config.plugin.enabled = True
+        self.bot.config.target.allowed_groups = ["target", "42"]
+        self.bot.config.target.allowed_friends = ["target", "42"]
         self.state = mod.ChatStreamState("chat", "target")
 
     async def test_default_life_intent_uses_same_planner_path(self):
@@ -59,12 +64,8 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kw["reason"], "custom_reason")
 
     def test_template_uses_complete_default_and_stays_disabled(self):
-        template = tomllib.loads(
-            (self.root / "config.toml").read_text(encoding="utf-8")
-        )
-        self.assertEqual(
-            template["intent"]["private_text"], self.bot.config.intent.private_text
-        )
+        template = tomllib.loads((self.root / "config.toml").read_text(encoding="utf-8"))
+        self.assertEqual(template["intent"]["private_text"], self.bot.config.intent.private_text)
         self.assertNotIn("text", template["intent"])
         self.assertNotIn("text", type(self.bot.config.intent).model_fields)
         self.assertFalse(template["plugin"]["enabled"])
@@ -100,9 +101,7 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot._intent_for(self.state), default)
 
     def test_unknown_legacy_text_is_not_kept_in_config(self):
-        cfg = self.mod.LonelyMaiConfig.model_validate(
-            {"intent": {"text": "旧字段不应被保存"}}
-        )
+        cfg = self.mod.LonelyMaiConfig.model_validate({"intent": {"text": "旧字段不应被保存"}})
         self.assertNotIn("text", cfg.model_dump()["intent"])
         self.assertFalse(hasattr(cfg.intent, "text"))
 
@@ -110,9 +109,7 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config.target.allowed_groups = ["42"]
         self.bot.config.target.allowed_friends = ["42"]
         self.bot.ctx.chat = types.SimpleNamespace(
-            get_stream_by_group_id=AsyncMock(
-                return_value={"stream": {"session_id": "group-chat"}}
-            ),
+            get_stream_by_group_id=AsyncMock(return_value={"stream": {"session_id": "group-chat"}}),
             get_stream_by_user_id=AsyncMock(
                 return_value={"stream": {"session_id": "private-chat"}}
             ),
@@ -147,3 +144,101 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
     async def test_trigger_exception_is_reported_as_failure(self):
         self.bot.ctx.maisaka.proactive.trigger.side_effect = RuntimeError("test")
         self.assertFalse(await self.bot._do_proactive_chat(self.state, "target"))
+
+    async def test_only_explicit_host_success_is_success(self):
+        for result in [
+            {"success": False, "error": "rejected"},
+            {},
+            None,
+            {"success": 1},
+            {"success": "true"},
+            {"result": {"success": True}},
+            AsyncMock(),
+        ]:
+            with self.subTest(result=type(result).__name__):
+                self.bot.ctx.maisaka.proactive.trigger.return_value = result
+                self.assertFalse(await self.bot._do_proactive_chat(self.state, "target"))
+
+    async def test_real_sdk_preserves_host_protocol(self):
+        from maibot_sdk.capabilities.maisaka import MaisakaCapability
+
+        context = types.SimpleNamespace(call_capability=AsyncMock())
+        self.bot.ctx.maisaka = MaisakaCapability(context)
+        for success in [False, True]:
+            context.call_capability.return_value = {"success": success}
+            self.assertIs(await self.bot._do_proactive_chat(self.state, "target"), success)
+            self.assertEqual(context.call_capability.call_args.args, ("maisaka.proactive.trigger",))
+
+    async def test_cached_manual_state_cannot_bypass_plugin_disable(self):
+        self.bot._states = {(False, "target"): self.state}
+        self.bot.config.plugin.enabled = False
+        self.assertFalse((await self.bot.cmd_trigger(stream_id="chat"))[0])
+        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+
+    async def test_cached_states_cannot_bypass_revoked_whitelists(self):
+        for group in [True, False]:
+            state = self.mod.ChatStreamState("chat", "target", is_group=group)
+            self.bot._states = {(group, "target"): state}
+            self.bot.config.target.allowed_groups = [] if group else ["target"]
+            self.bot.config.target.allowed_friends = ["target"] if group else []
+            self.assertFalse((await self.bot.cmd_trigger(stream_id="chat"))[0])
+            self.assertFalse(await self.bot._do_proactive_chat(state, "target"))
+        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+
+    async def test_manual_still_bypasses_scheduler_conditions(self):
+        self.bot._states = {(False, "target"): self.state}
+        self.bot.config.scheduler.enabled = False
+        self.bot.config.scheduler.probability = 0
+        self.state.last_proactive_time = 123
+        self.assertTrue((await self.bot.cmd_trigger(stream_id="chat"))[0])
+        self.assertEqual(self.state.last_proactive_time, 123)
+
+    async def test_scheduled_rejection_does_not_consume_cooldown(self):
+        cfg = self.bot.config.scheduler
+        cfg.start_time, cfg.end_time = "00:00", "23:59"
+        cfg.probability, cfg.isolation_time = 1, 0
+        self.bot.ctx.maisaka.proactive.trigger.return_value = {"success": False}
+        with patch.object(self.mod.random, "random", return_value=0):
+            await self.bot._check_and_trigger(self.state, "target")
+        self.assertEqual(self.state.last_proactive_time, 0)
+        self.bot.ctx.maisaka.proactive.trigger.return_value = {"success": True}
+        with patch.object(self.mod.random, "random", return_value=0):
+            await self.bot._check_and_trigger(self.state, "target")
+        self.assertGreater(self.state.last_proactive_time, 0)
+
+    async def test_manual_host_rejection_reports_failure(self):
+        self.bot._states = {(False, "target"): self.state}
+        self.bot.ctx.maisaka.proactive.trigger.return_value = {"success": False}
+        self.assertEqual(
+            await self.bot.cmd_trigger(stream_id="chat"), (False, "主动发言失败", True)
+        )
+
+    async def test_revocation_during_life_query_prevents_host_dispatch(self):
+        self.bot.config.life.enabled = True
+        self.bot._life = types.SimpleNamespace(
+            flush=AsyncMock(), claim=AsyncMock(), update=AsyncMock()
+        )
+
+        async def claim(_session):
+            self.bot.config.target.allowed_friends = []
+            return {"receipt_id": "a" * 32, "summary": "public"}
+
+        self.bot._life.claim.side_effect = claim
+        self.assertFalse(await self.bot._do_proactive_chat(self.state, "target"))
+        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+        self.bot._life.update.assert_awaited_once_with("a" * 32, "unknown")
+
+    async def test_life_host_rejection_and_unknown_settle_without_retry(self):
+        self.bot.config.life.enabled = True
+        self.bot._life = types.SimpleNamespace(
+            flush=AsyncMock(),
+            claim=AsyncMock(return_value={"receipt_id": "a" * 32, "summary": "public"}),
+            update=AsyncMock(),
+        )
+        for result in [{"success": False}, None, {"success": True, "task_id": "bad"}]:
+            self.bot.ctx.maisaka.proactive.trigger.reset_mock()
+            self.bot.ctx.maisaka.proactive.trigger.return_value = result
+            self.bot._life.update.reset_mock()
+            await self.bot._do_proactive_chat(self.state, "target")
+            self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+            self.bot._life.update.assert_awaited_once_with("a" * 32, "unknown", "")

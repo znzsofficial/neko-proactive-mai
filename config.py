@@ -34,23 +34,15 @@ class SchedulerSection(PluginConfigBase):
     check_interval: int = Field(default=30, description="检查间隔（分钟）")
     jitter: int = Field(default=5, description="间隔波动（分钟）")
     probability: float = Field(default=0.2, description="触发概率 0~1")
-    min_interval_between_chats: int = Field(
-        default=60, description="两次主动聊天最小间隔（分钟）"
-    )
-    isolation_time: int = Field(
-        default=15, description="距上次真人消息至少静默多少分钟才触发"
-    )
+    min_interval_between_chats: int = Field(default=60, description="两次主动聊天最小间隔（分钟）")
+    isolation_time: int = Field(default=15, description="距上次真人消息至少静默多少分钟才触发")
 
 
 class TargetSection(PluginConfigBase):
     """白名单——只对指定的群/用户生效。"""
 
-    allowed_groups: List[str] = Field(
-        default_factory=list, description="白名单群号列表"
-    )
-    allowed_friends: List[str] = Field(
-        default_factory=list, description="白名单QQ号列表"
-    )
+    allowed_groups: List[str] = Field(default_factory=list, description="白名单群号列表")
+    allowed_friends: List[str] = Field(default_factory=list, description="白名单QQ号列表")
 
 
 class LogSection(PluginConfigBase):
@@ -69,9 +61,7 @@ class IntentSection(PluginConfigBase):
         default=PRIVATE_PROACTIVE_INTENT,
         description="私聊主动发言意图：日常分享、旧事追问、早安/叫起床；空白时使用私聊默认",
     )
-    reason: str = Field(
-        default="attention_proactive", description="触发原因标识，用于日志和去重"
-    )
+    reason: str = Field(default="attention_proactive", description="触发原因标识，用于日志和去重")
 
 
 class LifeSection(PluginConfigBase):
