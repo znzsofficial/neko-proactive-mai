@@ -71,9 +71,9 @@ jobs:
       - name: Run tests
         run: python scripts/check_tests.py
       - name: Lint
-        run: |
-          python -m ruff check .
-          python -m ruff format --check .
+        run: python -m ruff check .
+      - name: Format
+        run: python -m ruff format --check .
       - name: Verify source package
         run: python scripts/check_archive.py
   ci-gate:
