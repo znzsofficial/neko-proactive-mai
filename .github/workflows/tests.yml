@@ -1,28 +1,114 @@
 name: tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run the complete supported compatibility matrix
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 3 * * *'
 permissions:
   contents: read
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      runtime: ${{ steps.changes.outputs.runtime }}
+      full: ${{ steps.changes.outputs.full }}
+      matrix: ${{ steps.changes.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        run: python .github/ci_policy.py classify --plugin neko-proactive-mai
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py docs
   tests:
+    name: runtime (${{ matrix.case }})
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ['3.12', '3.14']
-        sdk: [minimum, latest]
-    runs-on: ${{ matrix.os }}
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e ".[test]" tzdata
-      - if: matrix.sdk == 'minimum'
-        run: python -m pip install "maibot-plugin-sdk==2.12.0"
-      - if: matrix.sdk == 'latest'
-        run: python -m pip install --upgrade "maibot-plugin-sdk>=2.12.0,<3"
+      - name: Select real SDK
+        shell: python
+        env:
+          SDK_SPEC: ${{ matrix.sdk_spec }}
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'maibot-plugin-sdk'+os.environ['SDK_SPEC']], check=True)
       - run: python -m pip check
-      - run: python scripts/check_tests.py
-      - run: python -m ruff check .
-      - run: python -m ruff format --check .
-      - run: python scripts/check_archive.py
+      - name: Run tests
+        run: python scripts/check_tests.py
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Verify source package
+        run: python scripts/check_archive.py
+  ci-gate:
+    if: always()
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+  publish-gate:
+    if: always() && needs.changes.outputs.runtime == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+  compatibility-proof:
+    if: always() && needs.changes.outputs.full == 'true' && needs.tests.result == 'success' && needs.docs.result == 'success'
+    needs: [changes, docs, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python .github/ci_policy.py gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}

@@ -10,9 +10,18 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     suite = unittest.defaultTestLoader.discover(str(ROOT), pattern="test_*.py")
-    count = suite.countTestCases()
-    if count < 42:
-        raise SystemExit(f"Expected at least 42 tests; discovered {count}")
+
+    def ids(group):
+        for test in group:
+            if isinstance(test, unittest.TestSuite):
+                yield from ids(test)
+            else:
+                yield test.id()
+
+    discovered = set(ids(suite))
+    for module in ("test_intent", "test_life_bridge", "test_lifecycle", "test_prompt_visibility"):
+        if not any(name.startswith(module + ".") for name in discovered):
+            raise SystemExit("Required proactive test group is empty: " + module)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful() or result.skipped:
         raise SystemExit("Tests failed or skipped; SDK tests must actually execute")

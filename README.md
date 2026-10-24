@@ -112,7 +112,9 @@ python scripts/check_archive.py
 ```
 
 当前35项测试（原24项加11项）使用真实SDK及Mock Host/Life，不接触线上配置/服务。
-门禁要求至少35项且零skip；CI覆盖Windows/Linux × Python3.12/3.14 × SDK2.12.0/最新兼容2.x共8档，显式安装tzdata并检查依赖。
+日常源码CI保留Linux生产Python3.14.4/SDK2.16.0及Windows最低Python3.12/SDK2.12两组，完整自有测试、依赖检查、lint与最终源码包真实SDK导入仍跑。按关键意图/桥/生命周期/上下文测试组非空及实际成功守门，不用固定总用例数。原8组完整兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。
+
+纯根目录/docs下Markdown只检查本地文档，不能获得源码发布资格。`ci-gate`核对预期任务，`publish-gate`仅main的源码push或受控手动同SHA核心验证可成功；取消、失败、意外skip和旧提交不算通过。CI不自动部署，不发模型/QQ；如果要发布文档-only HEAD，手动运行同HEAD核心验证即可，不做空提交。
 Actions固定为GitHub API核实的提交SHA。仓库没有发布器；归档烟测仅在临时目录构建/解压源码zip，检查manifest与真实SDK插件工厂加载，排除config.toml、密钥、outbox，不新建发布/部署流水线。
 
 # 行为边界
