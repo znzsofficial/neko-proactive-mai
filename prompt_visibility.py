@@ -49,6 +49,14 @@ def filter_request(kwargs):
     """
     modified = dict(kwargs)
     removed = 0
+    # A shared Focus request can contain multiple genuine target tasks. With no
+    # single session, do not collapse them into one or guess scope from bodies.
+    if not kwargs.get("session_id"):
+        for tool in kwargs.get("tool_definitions") or []:
+            function = tool.get("function", {}) if isinstance(tool, dict) else {}
+            schema = function.get("parameters", {}) if isinstance(function, dict) else {}
+            if function.get("name") == "reply" and "session_id" in (schema.get("required") or []):
+                return modified, 0
     for key in ("items", "messages"):
         items = kwargs.get(key)
         if not isinstance(items, list):

@@ -226,7 +226,7 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.bot._life.claim.side_effect = claim
         self.assertFalse(await self.bot._do_proactive_chat(self.state, "target"))
         self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
-        self.bot._life.update.assert_awaited_once_with("a" * 32, "unknown")
+        self.bot._life.update.assert_awaited_once_with("a" * 32, "released")
 
     async def test_life_host_rejection_and_unknown_settle_without_retry(self):
         self.bot.config.life.enabled = True
@@ -241,4 +241,9 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
             self.bot._life.update.reset_mock()
             await self.bot._do_proactive_chat(self.state, "target")
             self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
-            self.bot._life.update.assert_awaited_once_with("a" * 32, "unknown", "")
+            expected = (
+                "released"
+                if isinstance(result, dict) and result.get("success") is False
+                else "unknown"
+            )
+            self.bot._life.update.assert_awaited_once_with("a" * 32, expected, "")

@@ -99,7 +99,7 @@ class LifeBridge:
             rows = {
                 k: v
                 for k, v in rows.items()
-                if v.get("status") not in {"sent", "released"}
+                if v.get("status") not in {"sent", "released", "declined"}
                 or time.time() - v.get("created", 0) < 7 * 86400
             }
             if len(rows) >= 128:
@@ -128,6 +128,7 @@ class LifeBridge:
                 "host_task": "",
                 "created": time.time(),
                 "acknowledged": False,
+                "protocol": candidate.get("protocol", 1),
             }
             await asyncio.to_thread(self._write, rows)
             return candidate
@@ -138,7 +139,7 @@ class LifeBridge:
             if receipt not in rows:
                 return
             row = rows[receipt]
-            if row["status"] == "sent":
+            if row["status"] in {"sent", "declined", "released"}:
                 return
             row.update(status=status, host_task=task or row["host_task"], acknowledged=False)
             await asyncio.to_thread(self._write, rows)
@@ -173,6 +174,33 @@ class LifeBridge:
                         row["acknowledged"] = True
                     except Exception:
                         break
+            # Reconcile new-protocol receipts, not QQ anchors. Polling never replays a Host task.
+            pending = sorted(
+                (
+                    r
+                    for r in rows.values()
+                    if r.get("protocol") == 2 and r["status"] in {"submitted", "adopted", "unknown"}
+                ),
+                key=lambda r: r.get("checked", 0),
+            )
+            for row in pending[:2]:
+                try:
+                    result = await self.call(
+                        "status", {k: row[k] for k in ("session_id", "receipt_id")}
+                    )
+                    if result.get("status") in {
+                        "sent",
+                        "declined",
+                        "released",
+                        "unknown",
+                        "adopted",
+                        "submitted",
+                    }:
+                        row["status"] = result["status"]
+                    row["checked"] = time.time()
+                except Exception:
+                    row["checked"] = time.time()
+                    break
             await asyncio.to_thread(self._write, rows)
 
     async def after_send(self, session, task, sent):
@@ -185,7 +213,11 @@ class LifeBridge:
         async with self.lock:
             rows = await asyncio.to_thread(self._read)
             matching = [
-                r for r in rows.values() if r["session_id"] == session and r["host_task"] == task
+                r
+                for r in rows.values()
+                if r.get("protocol", 1) == 1
+                and r["session_id"] == session
+                and r["host_task"] == task
             ]
         if len(matching) == 1:
             await self.update(matching[0]["receipt_id"], "sent", task)

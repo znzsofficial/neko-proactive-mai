@@ -128,3 +128,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         packet = calls[0].kwargs["args"]["packet"]
         self.assertEqual(packet["operation"], "receipt")
         self.assertEqual(packet["body"]["status"], "unknown")
+
+    async def test_new_protocol_ignores_even_proactive_qq_anchor_and_reconciles_from_life(self):
+        self.context.call_capability.return_value = {
+            "success": True,
+            "candidate": {"receipt_id": "a" * 32, "summary": "角色生活", "protocol": 2},
+        }
+        await self.bridge.claim("chat")
+        task = "proactive:neko.proactive:1700000000000"
+        self.context.call_capability.return_value = {"success": True}
+        await self.bridge.update("a" * 32, "submitted", task)
+        await self.bridge.after_send("chat", task, True)
+        self.assertEqual(self.bridge._read()["a" * 32]["status"], "submitted")
+        self.context.call_capability.reset_mock()
+        self.context.call_capability.return_value = {"success": True, "status": "sent"}
+        await self.bridge.flush()
+        self.assertEqual(self.bridge._read()["a" * 32]["status"], "sent")
+        packet = self.context.call_capability.call_args.kwargs["args"]["packet"]
+        self.assertEqual(packet["operation"], "status")
+        self.assertNotIn("host_task", packet["body"])

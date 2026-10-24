@@ -23,6 +23,27 @@ def item(text, kind="UserMessageItem"):
 
 
 class PromptVisibilityTests(unittest.TestCase):
+    def test_shared_focus_preserves_each_targets_current_task_without_guessing_from_body(self):
+        source = {
+            "session_id": "",
+            "tool_definitions": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "reply",
+                        "parameters": {
+                            "required": ["session_id"],
+                            "properties": {
+                                "session_id": {"type": "string", "enum": ["group-a", "group-b"]}
+                            },
+                        },
+                    },
+                }
+            ],
+            "items": [item(task(1791900000000)), item(task(1791900001000))],
+        }
+        self.assertEqual(filter_request(source), (source, 0))
+
     def test_latest_only_and_input_unchanged(self):
         a, b = item(task(1791900000000)), item(task(1791900001000))
         ordinary = item("用户：冷场插件太烦了")

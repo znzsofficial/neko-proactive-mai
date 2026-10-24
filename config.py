@@ -22,7 +22,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.1.0", description="插件版本")
+    version: str = Field(default="2.2.0", description="插件版本")
 
 
 class SchedulerSection(PluginConfigBase):
@@ -66,7 +66,7 @@ class IntentSection(PluginConfigBase):
 
 class LifeSection(PluginConfigBase):
     enabled: bool = Field(
-        default=False, description="通过签名接口获取Life公开见闻；失败仍按原流程聊天"
+        default=False, description="通过签名接口获取Life生活/公开见闻；失败仍按原流程聊天"
     )
 
 
