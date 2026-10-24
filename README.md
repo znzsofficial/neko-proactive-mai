@@ -2,6 +2,8 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+2.2.1：Life任务历史只保留候选不透明编号，不再写素材/操作提示。当前Planner请求通过签名`prompt`操作领取一次性临时素材，短时租约/真实会话/任务严格匹配；结束、过期或已展示不再注入，Replyer不重放Planner提示。旧Life任务从请求副本过滤，共享Focus按宿主focus_event来源分组，不删真实聊天/引用、发言或工具调用配对。摘要配套`neko-life-context-v1`按真实来源和临时Item标记过滤新摘要输入；已有摘要不清空。
+
 本项目是基于 [clfr41/neko.proactive](https://github.com/clfr41/neko.proactive)
 的独立维护项目，保留原 AGPL-3.0-or-later 许可证和来源说明；不是上游仓库的官方项目。
 

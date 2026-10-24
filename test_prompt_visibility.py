@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from prompt_visibility import filter_request
+from prompt_visibility import EPHEMERAL, filter_request, pending_offers, inject_offers
 
 
 def task(stamp, plugin="neko.proactive"):
@@ -23,6 +23,98 @@ def item(text, kind="UserMessageItem"):
 
 
 class PromptVisibilityTests(unittest.TestCase):
+    def test_life_tasks_and_previous_ephemeral_data_removed_but_real_utterances_remain(self):
+        text = task(1791900000000).replace(
+            "attention_proactive",
+            'attention_proactive\n<neko_life_offer receipt_id="' + "a" * 32 + '"/>',
+        )
+        owned = item(text)
+        ordinary = item("我刚读了本书，挺有意思。", "AssistantMessageItem")
+        quoted = item("用户引用：\n" + text)
+        old = {
+            "item_type": "SystemMessageItem",
+            "meta": {"item_id": EPHEMERAL + "old"},
+            "parts": [{"type": "text", "text": "旧素材"}],
+        }
+        call = {"item_type": "FunctionCallItem", "call_id": "paired"}
+        output = {"item_type": "FunctionCallOutputItem", "call_id": "paired", "output": text}
+        source = {"items": [owned, ordinary, quoted, old, call, output], "session_id": "chat"}
+        before = copy.deepcopy(source)
+        result, count = filter_request(source)
+        self.assertEqual(count, 2)
+        self.assertEqual(result["items"], [ordinary, quoted, call, output])
+        self.assertEqual(source, before)
+
+    def test_legacy_life_payload_is_removed_even_after_its_lease_has_expired(self):
+        text = task(1791900000000).replace(
+            '{"source": "lonelymai"}',
+            '{"source":"lonelymai","neko_life_receipt_id":"' + "b" * 32 + '"}',
+        )
+        result, count = filter_request({"items": [item(text)], "session_id": "chat"})
+        self.assertEqual(result["items"], [])
+        self.assertEqual(count, 1)
+
+    def test_shared_focus_keeps_latest_per_real_host_scope_and_does_not_mix_members(self):
+        def focus(scope, stamp):
+            return item(
+                '[聊天任务事件]\n<focus_event session_id="'
+                + scope
+                + '" chat_name="group">\n'
+                + task(stamp)
+                + "\n</focus_event>"
+            )
+
+        a, b, new_a = (
+            focus("a", 1791900000000),
+            focus("b", 1791900000500),
+            focus("a", 1791900001000),
+        )
+        definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "reply",
+                    "parameters": {
+                        "required": ["session_id"],
+                        "properties": {"session_id": {"type": "string", "enum": ["a", "b"]}},
+                    },
+                },
+            }
+        ]
+        result, count = filter_request(
+            {"items": [a, b, new_a], "session_id": "", "tool_definitions": definitions}
+        )
+        self.assertEqual(result["items"], [b, new_a])
+        self.assertEqual(count, 1)
+
+    def test_only_fresh_scoped_life_offers_can_be_fetched_and_unknown_scope_never_guessed(self):
+        text = task(1791900000000).replace(
+            "attention_proactive",
+            'attention_proactive\n<neko_life_offer receipt_id="' + "a" * 32 + '"/>',
+        )
+        kwargs = {"items": [item(text)], "session_id": "chat"}
+        records = pending_offers(kwargs, 1791900001)
+        self.assertEqual([(r["scope"], r["receipt"]) for r in records], [("chat", "a" * 32)])
+        self.assertEqual(pending_offers(kwargs, 1791900181), [])
+        self.assertEqual(pending_offers({**kwargs, "session_id": ""}, 1791900001), [])
+        self.assertEqual(
+            pending_offers({**kwargs, "items": [item("quoted:" + text)]}, 1791900001), []
+        )
+
+    def test_ephemeral_item_is_bounded_owned_and_removed_from_next_request(self):
+        offers = [
+            (
+                "group-a",
+                "a" * 32,
+                {"summary": "新生活素材", "fictional": True, "_intent": "保持自定义群意图"},
+            )
+        ]
+        result = inject_offers([], offers)
+        self.assertTrue(result[0]["meta"]["item_id"].startswith(EPHEMERAL))
+        self.assertIn("保持自定义群意图", result[0]["parts"][0]["text"])
+        self.assertLessEqual(len(result[0]["parts"][0]["text"]), 1600)
+        self.assertEqual(filter_request({"items": result})[0]["items"], [])
+
     def test_shared_focus_preserves_each_targets_current_task_without_guessing_from_body(self):
         source = {
             "session_id": "",
