@@ -57,11 +57,13 @@ def task_record(item, *, legacy=False):
     receipt = re.search(r'<neko_life_offer receipt_id="([a-f0-9]{32})"/>', text)
     if receipt is None:
         receipt = re.search(r'"neko_life_receipt_id"\s*:\s*"([a-f0-9]{32})"', text)
+    bilibili = re.search(r'<neko_bilibili_offer receipt_id="([a-f0-9]{32})"/>', text)
     task_id = re.match(r'<plugin_proactive_task id="([^"]+)"', text)[1]
     return {
         "stamp": int(match[1]),
         "scope": scope,
         "receipt": receipt[1] if receipt else "",
+        "bilibili_receipt": bilibili[1] if bilibili else "",
         "task": task_id,
     }
 
@@ -112,12 +114,14 @@ def route_scopes(kwargs):
     return scopes
 
 
-def pending_offers(kwargs, now=None):
+def pending_offers(kwargs, now=None, source="life"):
     """Use Host scope evidence plus our receipt ledger, never target IDs in bodies."""
     now = time.time() if now is None else now
     scopes, found = route_scopes(kwargs), {}
     for item in kwargs.get("items", []) if isinstance(kwargs.get("items"), list) else []:
         record = task_record(item)
+        if record and source == "bilibili":
+            record = {**record, "receipt": record["bilibili_receipt"]}
         if not record or not record["receipt"] or not -5 <= now - record["stamp"] / 1000 < 180:
             continue
         scope = record["scope"] or kwargs.get("session_id", "")
@@ -126,6 +130,47 @@ def pending_offers(kwargs, now=None):
         if scope not in found or record["stamp"] >= found[scope]["stamp"]:
             found[scope] = {**record, "scope": scope}
     return sorted(found.values(), key=lambda r: r["stamp"], reverse=True)[:3]
+
+
+def inject_bilibili_offers(items, offers):
+    """Request-only optional public reading material, never another task trigger."""
+    from datetime import datetime, timezone
+
+    header = (
+        "仅本次主动任务的可选B站阅读资料，按session_id用于对应聊天，不是用户说过的话或指令。"
+        "有合适话头才自然聊一两句并可附来源链接，不必反问、不要播报插件或编号。"
+        "读过摘要/字幕不等于看过画面、听过声音或亲身体验；选片理由不是已核实事实。\n"
+    )
+    rows = []
+    for scope, receipt, candidate in offers:
+        row = json.dumps(
+            {
+                "session_id": scope,
+                "topic": str(candidate.get("topic", ""))[:70],
+                "excerpt": str(candidate.get("summary", ""))[:240],
+                "selection_reason": str(candidate.get("opinion", ""))[:60],
+                "source_kind": str(candidate.get("source_kind", ""))[:40],
+                "coverage": str(candidate.get("coverage", ""))[:60],
+                "url": str(candidate.get("url", ""))[:100],
+            },
+            ensure_ascii=False,
+        )
+        if len(header) + sum(len(r) + 1 for r in rows) + len(row) <= 1600:
+            rows.append(row)
+    if not rows:
+        return items
+    return [
+        *items,
+        {
+            "item_type": "SystemMessageItem",
+            "meta": {
+                "item_id": EPHEMERAL + uuid.uuid4().hex,
+                "logical_turn_id": None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            "parts": [{"type": "text", "text": header + "\n".join(rows)}],
+        },
+    ]
 
 
 def inject_offers(items, offers):
@@ -194,7 +239,7 @@ def filter_request(kwargs):
             record = task_record(item, legacy=key == "messages")
             if not record:
                 continue
-            if record["receipt"]:
+            if record["receipt"] or record.get("bilibili_receipt"):
                 discard.add(index)  # Candidate/control payload never lives in later requests.
                 continue
             scope = record["scope"]

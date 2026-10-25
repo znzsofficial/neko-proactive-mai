@@ -16,14 +16,20 @@ LEGACY_CLIENT_ID = "attention-seeker-mai"
 
 
 class LifeBridge:
-    def __init__(self, context):
+    terminal_statuses = {"sent", "released", "declined"}
+    accepted_statuses = {"sent", "declined", "released", "unknown", "adopted", "submitted"}
+
+    def __init__(
+        self, context, *, provider="neko.life", prefix="life", api_name="neko.life.sharing_v1"
+    ):
         self.context = context
         self.directory = Path(context.paths.data_dir)
-        self.path = self.directory / "life-outbox.json"
+        self.provider, self.prefix, self.api_name = provider, prefix, api_name
+        self.path = self.directory / (prefix + "-outbox.json")
         self.lock = asyncio.Lock()
 
     def _keys(self):
-        p = self.directory / "life-client.json"
+        p = self.directory / (self.prefix + "-client.json")
         if (
             p.is_symlink()
             or p.stat().st_size > 1024
@@ -49,7 +55,7 @@ class LifeBridge:
     def _write(self, rows):
         self._read()  # Never overwrite corrupt state as empty.
         self.directory.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix=".life-outbox-", dir=self.directory)
+        fd, name = tempfile.mkstemp(prefix="." + self.prefix + "-outbox-", dir=self.directory)
         try:
             os.chmod(name, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -66,7 +72,7 @@ class LifeBridge:
         packet = {
             "v": 1,
             "client": CLIENT_ID,
-            "audience": "neko.life",
+            "audience": self.provider,
             "issued": int(time.time()),
             "nonce": uuid.uuid4().hex,
             "operation": operation,
@@ -83,7 +89,7 @@ class LifeBridge:
         async with asyncio.timeout(2):
             response = await self.context.call_capability(
                 "api.call",
-                api_name="neko.life.sharing_v1",
+                api_name=self.api_name,
                 version="1",
                 args={"packet": packet},
             )
@@ -99,7 +105,7 @@ class LifeBridge:
             rows = {
                 k: v
                 for k, v in rows.items()
-                if v.get("status") not in {"sent", "released", "declined"}
+                if v.get("status") not in self.terminal_statuses
                 or time.time() - v.get("created", 0) < 7 * 86400
             }
             if len(rows) >= 128:
@@ -139,7 +145,7 @@ class LifeBridge:
             if receipt not in rows:
                 return
             row = rows[receipt]
-            if row["status"] in {"sent", "declined", "released"}:
+            if row["status"] in self.terminal_statuses:
                 return
             row.update(status=status, host_task=task or row["host_task"], acknowledged=False)
             await asyncio.to_thread(self._write, rows)
@@ -188,14 +194,7 @@ class LifeBridge:
                     result = await self.call(
                         "status", {k: row[k] for k in ("session_id", "receipt_id")}
                     )
-                    if result.get("status") in {
-                        "sent",
-                        "declined",
-                        "released",
-                        "unknown",
-                        "adopted",
-                        "submitted",
-                    }:
+                    if result.get("status") in self.accepted_statuses:
                         row["status"] = result["status"]
                     row["checked"] = time.time()
                 except Exception:

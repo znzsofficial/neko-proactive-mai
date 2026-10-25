@@ -15,6 +15,7 @@ FILES = (
     "plugin.py",
     "config.py",
     "life_bridge.py",
+    "bilibili_bridge.py",
     "prompt_visibility.py",
     "README.md",
     "LICENSE",

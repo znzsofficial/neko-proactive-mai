@@ -19,7 +19,13 @@ def main():
                 yield test.id()
 
     discovered = set(ids(suite))
-    for module in ("test_intent", "test_life_bridge", "test_lifecycle", "test_prompt_visibility"):
+    for module in (
+        "test_intent",
+        "test_life_bridge",
+        "test_lifecycle",
+        "test_prompt_visibility",
+        "test_bilibili_bridge",
+    ):
         if not any(name.startswith(module + ".") for name in discovered):
             raise SystemExit("Required proactive test group is empty: " + module)
     result = unittest.TextTestRunner(verbosity=2).run(suite)

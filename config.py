@@ -22,7 +22,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.2.1", description="插件版本")
+    version: str = Field(default="2.3.0", description="插件版本")
 
 
 class SchedulerSection(PluginConfigBase):
@@ -70,6 +70,13 @@ class LifeSection(PluginConfigBase):
     )
 
 
+class BilibiliSection(PluginConfigBase):
+    enabled: bool = Field(
+        default=False,
+        description="领取自己fork的B站已读资料作为本次主动聊天可选素材；不触发浏览/模型，不代表已发QQ。还须B站侧独立开启并允许同一群。",
+    )
+
+
 class LonelyMaiConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     scheduler: SchedulerSection = Field(default_factory=SchedulerSection)
@@ -77,3 +84,4 @@ class LonelyMaiConfig(PluginConfigBase):
     log: LogSection = Field(default_factory=LogSection)
     intent: IntentSection = Field(default_factory=IntentSection)
     life: LifeSection = Field(default_factory=LifeSection)
+    bilibili: BilibiliSection = Field(default_factory=BilibiliSection)

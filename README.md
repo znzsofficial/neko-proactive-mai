@@ -2,6 +2,12 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+2.3.0：新增默认关闭的`bilibili.enabled`。从自己fork的B站插件签名领取真实阅读资料，
+只在现有主动条件满足后查询，不新增浏览/总结调用或定时器。双方QQ群授权取交集，不继承Life或私聊名单。
+正文仅本次Planner临时提示，任务历史只留不透明编号；共享Focus按真实目标过滤，下一轮及摘要入口清理。
+`bilibili-client.json/bilibili-outbox.json`与Life原密钥/账本分开，shown只代表提供过资料，不代表发到QQ；未知不重放。
+Life已退役时保持`life.enabled=false`，普通群私意图、概率、时段、冷却和TTS照旧。
+
 2.2.1：Life任务历史只保留候选不透明编号，不再写素材/操作提示。当前Planner请求通过签名`prompt`操作领取一次性临时素材，短时租约/真实会话/任务严格匹配；结束、过期或已展示不再注入，Replyer不重放Planner提示。旧Life任务从请求副本过滤，共享Focus按宿主focus_event来源分组，不删真实聊天/引用、发言或工具调用配对。摘要配套`neko-life-context-v1`按真实来源和临时Item标记过滤新摘要输入；已有摘要不清空。
 
 本项目是基于 [clfr41/neko.proactive](https://github.com/clfr41/neko.proactive)

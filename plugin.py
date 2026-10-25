@@ -329,7 +329,46 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 pass  # Missing/expired state never resurrects an old candidate or sends anything.
         if offers:
             modified["items"] = inject_offers(items, offers)
-        if removed or offers:
+        bili_offers = []
+        if isinstance(items, list) and self.config.plugin.enabled and self.config.bilibili.enabled:
+            try:
+                from .bilibili_bridge import BilibiliBridge
+                from .prompt_visibility import inject_bilibili_offers
+
+                bridge = getattr(self, "_bilibili", None)
+                if bridge is None:
+                    bridge = self._bilibili = BilibiliBridge(self.ctx)
+                async with asyncio.timeout(3):
+                    for record in pending_offers(kwargs, source="bilibili"):
+                        state = next(
+                            (s for s in self._states.values() if s.stream_id == record["scope"]),
+                            None,
+                        )
+                        if state is None or not self._is_authorized(state, state.target_id):
+                            continue
+                        result = await bridge.call(
+                            "prompt",
+                            {
+                                "session_id": record["scope"],
+                                "receipt_id": record["receipt"],
+                                "host_task": record["task"],
+                            },
+                        )
+                        if (
+                            isinstance(result.get("candidate"), dict)
+                            and self._is_authorized(state, state.target_id)
+                            and self.config.bilibili.enabled
+                        ):
+                            bili_offers.append(
+                                (record["scope"], record["receipt"], result["candidate"])
+                            )
+                if bili_offers:
+                    modified["items"] = inject_bilibili_offers(
+                        modified.get("items", items), bili_offers
+                    )
+            except Exception:
+                pass  # Source outage never grants another chat or resurrects material.
+        if removed or offers or bili_offers:
             return {"action": "continue", "modified_kwargs": modified}
         return None
 
@@ -378,6 +417,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
             self._skip(target_id, "插件已禁用或目标已撤权")
             return False
         candidate = None
+        candidate_bridge = None
         reason = self.config.intent.reason
         metadata = {
             "source": "lonelymai",
@@ -394,17 +434,37 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     await self._life.flush()
                     candidate = await self._life.claim(state.stream_id)
                 if candidate:
+                    candidate_bridge = self._life
                     reason += '\n<neko_life_offer receipt_id="' + candidate["receipt_id"] + '"/>'
                     metadata["neko_life_receipt_id"] = candidate["receipt_id"]
             except Exception as exc:
                 candidate = None
                 self.ctx.logger.warning("Life候选获取或结算不可用: %s", type(exc).__name__)
+        if self.config.bilibili.enabled:
+            try:
+                from .bilibili_bridge import BilibiliBridge
+
+                bridge = getattr(self, "_bilibili", None)
+                if bridge is None:
+                    bridge = self._bilibili = BilibiliBridge(self.ctx)
+                if candidate is None:
+                    async with asyncio.timeout(3):
+                        await bridge.flush()
+                        candidate = await bridge.claim(state.stream_id)
+                    if candidate:
+                        candidate_bridge = bridge
+                        reason += (
+                            '\n<neko_bilibili_offer receipt_id="' + candidate["receipt_id"] + '"/>'
+                        )
+                        metadata["neko_bilibili_receipt_id"] = candidate["receipt_id"]
+            except Exception as exc:
+                self.ctx.logger.warning("B站阅读素材暂不可用: %s", type(exc).__name__)
         try:
             # Life I/O yields to config updates. Recheck immediately before Host I/O;
             # an already dispatched Host request cannot be recalled by this plugin.
             if not self._is_authorized(state, target_id):
                 if candidate:
-                    await self._life.update(candidate["receipt_id"], "released")
+                    await candidate_bridge.update(candidate["receipt_id"], "released")
                 return False
             result = await self.ctx.maisaka.proactive.trigger(
                 stream_id=state.stream_id,
@@ -423,7 +483,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 ):
                     task_id = ""
                 try:
-                    await self._life.update(
+                    await candidate_bridge.update(
                         candidate["receipt_id"],
                         "submitted"
                         if task_id
@@ -447,7 +507,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
         except Exception as e:
             if candidate:
                 try:
-                    await self._life.update(candidate["receipt_id"], "unknown")
+                    await candidate_bridge.update(candidate["receipt_id"], "unknown")
                 except Exception:
                     pass
             self.ctx.logger.error(f"[{target_id}] 主动触发失败: {e}", exc_info=True)
