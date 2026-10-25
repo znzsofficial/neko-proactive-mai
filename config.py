@@ -7,47 +7,82 @@ from typing import List
 from maibot_sdk import Field, PluginConfigBase
 
 
-GROUP_PROACTIVE_INTENT = "群聊冷场了，主动找个话题聊聊"
+GROUP_PROACTIVE_INTENT = (
+    "想和群友聊两句。结合当前对话、记忆和本次可用素材，选择一个自然话头；"
+    "正在聊就顺着接，没有合适内容可以不发。不重复刚聊过的话，不必反问。"
+)
 
 
 PRIVATE_PROACTIVE_INTENT = (
-    "想找对方聊两句，可以分享自己的日常、感受或小计划，"
-    "也可以顺着前面确实聊过、还没结束的事，问一句后来怎么样了。"
-    "早晨可以照常说早安、问醒了没，或按约定叫起床。"
-    "结合时间和最近对话选一个自然的话头，不机械查岗、不重复追问已回答的事，不必以问题收尾。"
-    "已经在聊就顺着接，没合适的话想说时可以暂时不发。"
+    "想找对方聊两句，优先分享有依据的见闻、感受或想法，也可以自然续接未结束的话题。"
+    "吃饭、天气、行程等具体经历只依据已知信息，不自行补写。"
+    "早晨可说早安；叫起床须有真实约定。"
+    "正在聊就顺着接，不机械查岗，不重复追问已回答的事。"
+    "没合适话头可以不发，不必以问题收尾。"
 )
 
 
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.3.0", description="插件版本")
+    version: str = Field(default="2.3.1", description="插件版本，由维护流程更新，无需手改")
 
 
 class SchedulerSection(PluginConfigBase):
     """调度器设置——控制何时、多久触发一次主动注入。"""
 
-    enabled: bool = Field(default=True, description="是否开启主动聊天")
-    start_time: str = Field(default="08:00", description="每日开始时间 (HH:MM)")
-    end_time: str = Field(default="23:00", description="每日结束时间 (HH:MM)")
-    check_interval: int = Field(default=30, description="检查间隔（分钟）")
-    jitter: int = Field(default=5, description="间隔波动（分钟）")
-    probability: float = Field(default=0.2, description="触发概率 0~1")
-    min_interval_between_chats: int = Field(default=60, description="两次主动聊天最小间隔（分钟）")
-    isolation_time: int = Field(default=15, description="距上次真人消息至少静默多少分钟才触发")
+    enabled: bool = Field(
+        default=True,
+        description="开启本插件自动检查；不控制其他插件独立唤醒或直接发送，手动/saymai另行处理",
+    )
+    start_time: str = Field(
+        default="08:00", description="自动检查的每日开始时间HH:MM，按服务器本地时间；支持跨午夜"
+    )
+    end_time: str = Field(
+        default="23:00",
+        description="自动检查的每日结束时间HH:MM，按服务器本地时间；与开始相同不是全天",
+    )
+    check_interval: int = Field(
+        default=30, description="每轮检查完成后等待的分钟数，不是固定发言间隔；初次启动可立即检查"
+    )
+    jitter: int = Field(
+        default=5,
+        description="检查等待随机±多少分钟；45配5表示40～50分钟，最短等1分钟，不延迟已生成正文",
+    )
+    probability: float = Field(
+        default=0.2,
+        description="每个目标满足时段、冷却和静默条件后的触发概率0～1；1也不保证模型发言或QQ送达",
+    )
+    min_interval_between_chats: int = Field(
+        default=60,
+        description="同一目标两次自动任务被宿主接受的最小间隔（分钟），不是QQ发送间隔；冷却不跨完整重载持久化",
+    )
+    isolation_time: int = Field(
+        default=15,
+        description="距最近真人消息至少静默多少分钟，0为不要求；只管本插件自动检查，不限制其他插件",
+    )
 
 
 class TargetSection(PluginConfigBase):
     """白名单——只对指定的群/用户生效。"""
 
-    allowed_groups: List[str] = Field(default_factory=list, description="白名单群号列表")
-    allowed_friends: List[str] = Field(default_factory=list, description="白名单QQ号列表")
+    allowed_groups: List[str] = Field(
+        default_factory=list,
+        description="本插件可主动联系的QQ群号；不是全局白名单，B站素材另须双方群授权交集",
+    )
+    allowed_friends: List[str] = Field(
+        default_factory=list,
+        description="本插件可主动联系的好友QQ号；不自动授予B站或其他插件私聊权限",
+    )
 
 
 class LogSection(PluginConfigBase):
-    verbose: bool = Field(default=True)
-    scheduler_log: bool = Field(default=True)
+    verbose: bool = Field(
+        default=True, description="兼容保留项，当前未被日志逻辑使用；不会改变频率或消息内容"
+    )
+    scheduler_log: bool = Field(
+        default=True, description="显示下次检查时间与时段、冷却、静默期、概率等跳过原因；不改变调度"
+    )
 
 
 class IntentSection(PluginConfigBase):
@@ -55,18 +90,21 @@ class IntentSection(PluginConfigBase):
 
     group_text: str = Field(
         default=GROUP_PROACTIVE_INTENT,
-        description="群聊主动发言意图，默认普通冷场找话题；空白时也使用群聊默认，不沿用私聊意图",
+        description="群聊Planner意图，不是直接发送文案，也不预设已经冷场；空白回退群聊默认，不沿用私聊意图",
     )
     private_text: str = Field(
         default=PRIVATE_PROACTIVE_INTENT,
-        description="私聊主动发言意图：日常分享、旧事追问、早安/叫起床；空白时使用私聊默认",
+        description="私聊Planner意图：有依据的见闻/想法与自然续聊，不补写日常；叫起床须有真实约定，空白回退私聊默认",
     )
-    reason: str = Field(default="attention_proactive", description="触发原因标识，用于日志和去重")
+    reason: str = Field(
+        default="attention_proactive", description="内部触发原因标识，不是聊天正文，通常保持原值"
+    )
 
 
 class LifeSection(PluginConfigBase):
     enabled: bool = Field(
-        default=False, description="通过签名接口获取Life生活/公开见闻；失败仍按原流程聊天"
+        default=False,
+        description="旧Life素材桥；Life已停用的部署保持关闭，不用于重新启用梦境/日记；失败仍可普通聊天",
     )
 
 

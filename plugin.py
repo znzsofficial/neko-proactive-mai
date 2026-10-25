@@ -545,7 +545,11 @@ class LonelyMaiPlugin(MaiBotPlugin):
 
     # ========== 手动命令 ==========
 
-    @Command("lonelymai_trigger", description="手动触发一次主动发言", pattern=r"^/saymai$")
+    @Command(
+        "lonelymai_trigger",
+        description="手动请求主动聊天，不保证发言；检查目标授权但不走自动时段/概率/冷却",
+        pattern=r"^/saymai$",
+    )
     async def cmd_trigger(self, stream_id: str = "", **kwargs):
         if not stream_id:
             return False, "无法获取当前会话 ID", True

@@ -44,8 +44,10 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         kw = self.bot.ctx.maisaka.proactive.trigger.call_args.kwargs
         self.assertEqual(kw["stream_id"], "chat")
         self.assertEqual(kw["intent"], self.bot.config.intent.private_text)
-        self.assertIn("分享自己的日常", kw["intent"])
-        self.assertIn("后来怎么样了", kw["intent"])
+        self.assertIn("优先分享有依据", kw["intent"])
+        self.assertIn("自然续接未结束的话题", kw["intent"])
+        self.assertIn("不自行补写", kw["intent"])
+        self.assertIn("须有真实约定", kw["intent"])
         self.assertIn("早安", kw["intent"])
         self.assertIn("叫起床", kw["intent"])
         self.assertLess(len(kw["intent"]), 200)
@@ -70,14 +72,17 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("text", type(self.bot.config.intent).model_fields)
         self.assertFalse(template["plugin"]["enabled"])
         self.assertEqual(template["plugin"]["config_version"], "2.0.0")
-        self.assertEqual(template["plugin"]["version"], "2.0.4")
+        self.assertEqual(template["plugin"]["version"], self.bot.config.plugin.version)
+        self.assertEqual(template["intent"]["group_text"], self.bot.config.intent.group_text)
 
-    async def test_group_uses_normal_cold_prompt_not_private_text(self):
+    async def test_group_uses_own_prompt_without_asserting_a_cold_chat(self):
         self.bot.config.intent.private_text = "明确私聊定制"
         state = self.mod.ChatStreamState("group-chat", "target", is_group=True)
         await self.bot._do_proactive_chat(state, "target")
         kw = self.bot.ctx.maisaka.proactive.trigger.call_args.kwargs
-        self.assertEqual(kw["intent"], "群聊冷场了，主动找个话题聊聊")
+        self.assertEqual(kw["intent"], self.mod.GROUP_PROACTIVE_INTENT)
+        self.assertNotIn("冷场了", kw["intent"])
+        self.assertIn("没有合适内容可以不发", kw["intent"])
         self.assertEqual(kw["metadata"]["chat_kind"], "group")
 
     async def test_group_and_private_custom_prompts_select_independently(self):
@@ -95,7 +100,7 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config.intent.group_text = "  "
         self.bot.config.intent.private_text = "私聊新设置"
         state = self.mod.ChatStreamState("chat", "target", is_group=True)
-        self.assertEqual(self.bot._intent_for(state), "群聊冷场了，主动找个话题聊聊")
+        self.assertEqual(self.bot._intent_for(state), self.mod.GROUP_PROACTIVE_INTENT)
         self.bot.config.intent.private_text = "  "
         default = self.mod.LonelyMaiConfig().intent.private_text
         self.assertEqual(self.bot._intent_for(self.state), default)
@@ -104,6 +109,34 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         cfg = self.mod.LonelyMaiConfig.model_validate({"intent": {"text": "旧字段不应被保存"}})
         self.assertNotIn("text", cfg.model_dump()["intent"])
         self.assertFalse(hasattr(cfg.intent, "text"))
+
+    def test_description_changes_do_not_change_scheduler_or_authorization_defaults(self):
+        cfg = self.mod.LonelyMaiConfig()
+        self.assertEqual(
+            cfg.scheduler.model_dump(),
+            {
+                "enabled": True,
+                "start_time": "08:00",
+                "end_time": "23:00",
+                "check_interval": 30,
+                "jitter": 5,
+                "probability": 0.2,
+                "min_interval_between_chats": 60,
+                "isolation_time": 15,
+            },
+        )
+        self.assertEqual(cfg.target.model_dump(), {"allowed_groups": [], "allowed_friends": []})
+        self.assertFalse(cfg.life.enabled)
+        self.assertFalse(cfg.bilibili.enabled)
+
+    def test_real_config_schema_explains_scope_and_non_delivery_semantics(self):
+        schema = self.mod.LonelyMaiConfig.model_json_schema()
+        fields = schema["$defs"]["SchedulerSection"]["properties"]
+        self.assertIn("其他插件", fields["enabled"]["description"])
+        self.assertIn("服务器本地时间", fields["start_time"]["description"])
+        self.assertIn("检查等待", fields["jitter"]["description"])
+        self.assertIn("不保证", fields["probability"]["description"])
+        self.assertIn("宿主接受", fields["min_interval_between_chats"]["description"])
 
     async def test_equal_numeric_group_and_friend_ids_have_separate_states(self):
         self.bot.config.target.allowed_groups = ["42"]
