@@ -14,12 +14,13 @@ import json
 from datetime import datetime, time as datetime_time
 from typing import Dict, Optional, Tuple
 
-from maibot_sdk import Command, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo
 
 from .config import GROUP_PROACTIVE_INTENT, PRIVATE_PROACTIVE_INTENT, LonelyMaiConfig
 from .prompt_visibility import filter_request, pending_offers, inject_offers
 from .wake_store import CONTRACT, PENDING, WakeStore, text
+from .webui import WakeManagement
 
 
 # ==================== 工具函数 ====================
@@ -51,7 +52,7 @@ class ChatStreamState:
 # ==================== 插件主类 ====================
 
 
-class LonelyMaiPlugin(MaiBotPlugin):
+class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     config_model = LonelyMaiConfig
 
     def __init__(self):
@@ -65,6 +66,13 @@ class LonelyMaiPlugin(MaiBotPlugin):
         self._wake_event = asyncio.Event()
         self._wakes = None
         self._wake_ready = False
+        self._next_regular_at = None
+        self._next_pass_at = None
+        self._scheduler_phase = "stopped"
+        self._observations = {}
+        self._submission_results = {}
+        self._management_operation = "尚无管理操作"
+        self._management_epoch = 0
 
     # ========== 生命周期 ==========
 
@@ -74,6 +82,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
         await self._sync_scheduler()
 
     async def on_unload(self) -> None:
+        self._management_epoch = getattr(self, "_management_epoch", 0) + 1
         self._wake_ready = False
         async with self._lifecycle_lock:
             await self._stop_scheduler()
@@ -81,6 +90,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
 
     async def on_config_update(self, *args, **kwargs):
         del args, kwargs
+        self._management_epoch = getattr(self, "_management_epoch", 0) + 1
         await self._sync_scheduler()
 
     async def _stop_scheduler(self) -> None:
@@ -89,17 +99,21 @@ class LonelyMaiPlugin(MaiBotPlugin):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        self._next_regular_at = self._next_pass_at = None
+        self._scheduler_phase = "stopped"
 
     async def _sync_scheduler(self) -> None:
         async with self._lifecycle_lock:
             await self._stop_scheduler()
+            # Management stays readable when automatic scheduling is disabled.
+            self._bot_qq = await self._get_global_str("bot.qq_account", "")
             if not self.config.plugin.enabled or not self.config.scheduler.enabled:
                 self.ctx.logger.info("Neko Proactive Mai 调度器已禁用")
                 return
-            self._bot_qq = await self._get_global_str("bot.qq_account", "")
             # Keep cooldown state; only the scheduler resolves targets, avoiding
             # concurrent replacement of states during an in-flight trigger.
             self._scheduler_task = asyncio.create_task(self._schedule_loop())
+            self._scheduler_phase = "starting"
             self.ctx.logger.info("Neko Proactive Mai 调度器已启动")
 
     async def _get_global_str(self, key: str, default: str = "") -> str:
@@ -232,27 +246,67 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     or resolved != session
                 ):
                     raise ValueError("private_chat_not_authorized")
-                store = self._get_wakes()
-                data = store.read()
-                row = data["slots"].get(target)
-                if row and row["session"] != session and action != "set":
-                    raise ValueError("session_changed")
-                if action == "set":
-                    row = store.set(data, target, session, at, timezone, intent, time.time())
-                elif action == "cancel":
-                    if row and row["status"] in PENDING:
-                        row.update(status="cancelled", block="")
-                        store.write(data)
-                elif action != "get":
-                    raise ValueError("invalid_action")
-                if action != "get":
-                    self._wake_event.set()
+                row = self._change_wake_locked(action, target, session, at, timezone, intent)
                 return {"success": True, "wake": row}
         except (ValueError, OSError) as exc:
             return {
                 "success": False,
                 "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
             }
+
+    def _change_wake_locked(
+        self, action, target, session, at="", zone="", intent="", *, revision=None, partial=False
+    ):
+        """Both trusted model and authenticated admin use this lock-held mutation."""
+        from .webui import wake_revision
+
+        if not self._wake_ready:
+            raise ValueError("wake_disabled")
+        if target not in {str(value).strip() for value in self.config.target.allowed_friends}:
+            raise ValueError("private_chat_not_authorized")
+        store = self._get_wakes()
+        data = store.read()
+        row = data["slots"].get(target)
+        if revision is not None and revision != wake_revision(target, session, row):
+            raise ValueError("stale_wake_revision")
+        if row and row["session"] != session and action != "set":
+            raise ValueError("session_changed")
+        if action == "set":
+            if not self._automatic_enabled():
+                raise ValueError("wake_disabled")
+            keep_time = (
+                partial
+                and row
+                and row["status"] in PENDING
+                and row["session"] == session
+                and not at
+            )
+            if partial and row and row["status"] in PENDING and row["session"] == session:
+                at, zone, intent = at or row["at"], zone or row["timezone"], intent or row["intent"]
+            row = store.set(
+                data, target, session, at, zone, intent, time.time(), keep_time=bool(keep_time)
+            )
+        elif action == "cancel":
+            if row and row["status"] in PENDING:
+                row.update(status="cancelled", block="")
+                store.write(data)
+        elif action != "get":
+            raise ValueError("invalid_action")
+        if action != "get":
+            self._wake_event.set()
+        return row
+
+    @API("wake_overview", description="只读主动检查与私聊预约管理状态", public=False)
+    async def wake_overview(self):
+        return await self.management_snapshot()
+
+    @API("wake_save", description="管理员设置或替换当前授权私聊预约", public=False)
+    async def wake_save(self, target="", session="", revision="", at="", timezone="", intent=""):
+        return await self.management_change("set", target, session, revision, at, timezone, intent)
+
+    @API("wake_cancel", description="管理员取消当前授权私聊的待执行预约，不重放", public=False)
+    async def wake_cancel(self, target="", session="", revision=""):
+        return await self.management_change("cancel", target, session, revision)
 
     async def _run_wakes(self):
         async with self._wake_lock:
@@ -282,6 +336,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     continue
                 queried_isolation = self.config.scheduler.isolation_time > 0
                 last = await self._get_last_msg_time(state.stream_id) if queried_isolation else None
+                self._note_check(state, "appointment", last_message=last)
                 # Query session fresh; config/lifecycle may change during Host reads.
                 resolved = await self._resolve_session_id(target, False)
                 if not self._wake_ready or not self._automatic_enabled():
@@ -317,15 +372,24 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 ):
                     block = "isolation"
                 if block:
+                    self._note_check(state, block, last_message=last)
                     row.update(status="blocked", block=block, retry=now + 60)
                     store.write(data)
                     continue
                 # Commit the uncertainty boundary BEFORE any Host submission.
                 # Cancellation, process loss, malformed results never replay this ID.
-                row.update(status="unknown", attempted=now, block="", task="", shown=False)
+                row.update(
+                    status="unknown",
+                    last_outcome="unknown",
+                    attempted=now,
+                    block="",
+                    task="",
+                    shown=False,
+                )
                 data["last_dispatch"] = now
                 store.write(data)
                 dispatched = True
+                self._record_submission(state, "unknown", "appointment", now)
                 try:
                     result = await self.ctx.maisaka.proactive.trigger(
                         stream_id=state.stream_id,
@@ -340,15 +404,18 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     )
                     if isinstance(result, dict) and result.get("success") is True:
                         row["status"] = "submitted"
+                        row["last_outcome"] = "submitted"
                         task = result.get("task_id")
                         if text(task, 160) and task.startswith("proactive:neko.proactive:"):
                             row["task"] = task
                         state.last_proactive_time = now
                     elif isinstance(result, dict) and result.get("success") is False:
                         row["status"] = "rejected"
+                        row["last_outcome"] = "rejected"
                 except Exception:
                     self.ctx.logger.warning("私聊预约提交结果未知；不自动重放")
                 store.write(data)
+                self._record_submission(state, row["status"], "appointment", now)
 
     def _wake_delay(self):
         now = time.time()
@@ -374,14 +441,20 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     await asyncio.sleep(60)
                     continue
 
+                self._scheduler_phase = "resolving"
+                self._next_pass_at = None
+                self._wake_event.clear()
                 await self._init_target_streams()
                 if not self._states:
                     await self._run_wakes()
+                    self._scheduler_phase = "unresolved"
+                    self._next_pass_at = time.time() + 15
                     self.ctx.logger.warning("没有可用目标流，15 秒后重新解析")
                     await asyncio.sleep(15)
                     continue
 
                 regular = time.monotonic() >= next_regular
+                self._scheduler_phase = "checking"
                 for state in list(self._states.values()) if regular else []:
                     target_id = state.target_id
                     allowed = (
@@ -399,11 +472,13 @@ class LonelyMaiPlugin(MaiBotPlugin):
 
                 if regular:
                     next_regular = time.monotonic() + self._next_sleep_seconds()
+                    self._next_regular_at = time.time() + max(0, next_regular - time.monotonic())
                 await self._run_wakes()
                 sleep_seconds = min(max(1, next_regular - time.monotonic()), self._wake_delay())
+                self._scheduler_phase = "waiting"
+                self._next_pass_at = time.time() + sleep_seconds
                 if self.config.log.scheduler_log:
                     self.ctx.logger.info(f"[调度器] 下次检查: +{int(sleep_seconds // 60)}min")
-                self._wake_event.clear()
                 try:
                     await asyncio.wait_for(self._wake_event.wait(), timeout=sleep_seconds)
                 except TimeoutError:
@@ -412,6 +487,8 @@ class LonelyMaiPlugin(MaiBotPlugin):
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self._scheduler_phase = "error"
+                self._next_pass_at = time.time() + 60
                 self.ctx.logger.error(f"调度器异常: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
@@ -420,6 +497,9 @@ class LonelyMaiPlugin(MaiBotPlugin):
             async with self._wake_lock:
                 row = self._get_wakes().read()["slots"].get(target_id)
                 if row and (row["status"] in PENDING or time.time() < self._guard_until(row)):
+                    self._note_check(
+                        state, "appointment" if row["status"] in PENDING else "cooldown"
+                    )
                     return
                 await self._check_default_and_trigger(state, target_id)
             return
@@ -428,11 +508,13 @@ class LonelyMaiPlugin(MaiBotPlugin):
     async def _check_default_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
         cfg = self.config
         now = datetime.now()
+        self._note_check(state, "checking")
         current_time = now.time()
         start = parse_time(cfg.scheduler.start_time)
         end = parse_time(cfg.scheduler.end_time)
 
         if not is_in_time_range(current_time, start, end):
+            self._note_check(state, "activity_hours")
             self._skip(target_id, f"不在 {cfg.scheduler.start_time}-{cfg.scheduler.end_time}")
             return
 
@@ -442,21 +524,26 @@ class LonelyMaiPlugin(MaiBotPlugin):
             and (now.timestamp() - state.last_proactive_time) < min_interval
         ):
             remain = int(min_interval - (now.timestamp() - state.last_proactive_time))
+            self._note_check(state, "cooldown")
             self._skip(target_id, f"距上次主动还有 {remain} 秒")
             return
 
         isolation_seconds = cfg.scheduler.isolation_time * 60
         if isolation_seconds > 0:
             last_msg_time = await self._get_last_msg_time(state.stream_id)
+            self._note_check(state, "checking", last_message=last_msg_time)
             if last_msg_time is not None and (now.timestamp() - last_msg_time) < isolation_seconds:
                 self._skip(target_id, "隔离期未到")
+                self._note_check(state, "isolation", last_message=last_msg_time)
                 return
 
         if random.random() >= cfg.scheduler.probability:
+            self._note_check(state, "probability")
             self._skip(target_id, f"概率未命中 ({cfg.scheduler.probability})")
             return
 
         self.ctx.logger.info(f"[{target_id}] 触发主动聊天")
+        self._note_check(state, "eligible")
         if await self._do_proactive_chat(state, target_id):
             state.last_proactive_time = now.timestamp()
 
@@ -778,6 +865,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 except Exception:
                     pass  # Durable lease/outbox prevents a second host trigger.
             if isinstance(result, dict) and result.get("success") is True:
+                self._record_submission(state, "submitted", "default")
                 self.ctx.logger.info(f"[{target_id}] 已注入 Planner 上下文")
                 return True
             outcome = (
@@ -785,9 +873,17 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 if isinstance(result, dict) and result.get("success") is False
                 else "宿主结果未知"
             )
+            self._record_submission(
+                state,
+                "rejected"
+                if isinstance(result, dict) and result.get("success") is False
+                else "unknown",
+                "default",
+            )
             self.ctx.logger.warning(f"[{target_id}] 主动触发失败: {outcome}")
             return False
         except Exception as e:
+            self._record_submission(state, "unknown", "default")
             if candidate:
                 try:
                     await candidate_bridge.update(candidate["receipt_id"], "unknown")

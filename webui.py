@@ -1,0 +1,381 @@
+"""Private WebUI projection. No timer, message-history reads or send controls."""
+
+import asyncio
+from datetime import datetime, timedelta
+import hashlib
+import json
+import time
+
+from .wake_store import PENDING, text
+
+STATUSES = {
+    "scheduled": "待唤醒",
+    "blocked": "等待规则放行",
+    "submitted": "宿主已接收",
+    "rejected": "宿主已拒绝",
+    "unknown": "提交结果未知",
+    "cancelled": "已取消",
+    "expired": "已过期",
+    "revoked": "授权或会话已失效",
+}
+REASONS = {
+    "": "—",
+    "activity_hours": "活动时段外",
+    "cooldown": "最小间隔未到",
+    "isolation": "真人静默期未到",
+    "dispatch_spacing": "等待预约提交间隔",
+    "restart_missed": "重载时已错过，不补执行",
+    "blocked_24h": "已等待24小时，停止执行",
+    "authorization_or_session_changed": "名单或真实会话已改变",
+    "probability": "本轮概率未命中",
+    "checking": "正在检查",
+    "eligible": "本轮条件通过",
+    "appointment": "由预约接管",
+}
+ERRORS = {
+    "wake_disabled": "插件或自动调度已关闭，未保存新预约；仍可取消待执行预约",
+    "private_chat_not_authorized": "目标不在当前私聊授权名单中",
+    "session_changed": "真实会话已改变，请刷新后重新选择",
+    "stale_wake_revision": "预约已被模型、调度器或其他管理员修改，请刷新后重新选择",
+    "invalid_time_or_intent": "填写带偏移的绝对时刻、IANA时区及1～240字符意图",
+    "timezone_offset_required": "预约时刻必须带UTC偏移，例如+08:00",
+    "timezone_offset_mismatch": "时刻的UTC偏移与所选IANA时区不匹配",
+    "invalid_timezone": "IANA时区无效，例如Asia/Shanghai",
+    "time_must_be_60s_to_7d_in_future": "新时刻必须在未来60秒至7天内",
+    "wake_index_full": "预约存储已满，可修改已有目标；未清除未知记录",
+    "invalid_management_request": "管理参数无效，请刷新后重新选择目标",
+}
+
+
+def wake_revision(target, session, row):
+    raw = json.dumps([target, session, row], ensure_ascii=False, sort_keys=True, allow_nan=False)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def local_time(stamp):
+    return (
+        datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds") if stamp else "—"
+    )
+
+
+def next_activity(now, start, end):
+    """Next server-local policy opening; projection only, never a timer deadline."""
+    current = datetime.fromtimestamp(now)
+    beginning = datetime.strptime(start, "%H:%M").time()
+    ending = datetime.strptime(end, "%H:%M").time()
+    inside = (
+        beginning <= current.time() <= ending
+        if beginning <= ending
+        else current.time() >= beginning or current.time() <= ending
+    )
+    if inside:
+        return now
+    candidate = datetime.combine(current.date(), beginning)
+    if candidate.timestamp() <= now:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
+
+
+class WakeManagement:
+    def _note_check(self, state, reason, **extra):
+        key = (state.is_group, state.target_id)
+        previous = self._observations.get(key, {})
+        self._observations[key] = {
+            **previous,
+            "session": state.stream_id,
+            "at": time.time(),
+            "reason": reason,
+            **extra,
+        }
+        while len(self._observations) > 256:
+            self._observations.pop(next(iter(self._observations)))
+
+    def _record_submission(self, state, outcome, source, stamp=None):
+        self._submission_results[(state.is_group, state.target_id)] = {
+            "status": outcome,
+            "source": source,
+            "session": state.stream_id,
+            "at": stamp if stamp is not None else time.time(),
+        }
+        while len(self._submission_results) > 256:
+            self._submission_results.pop(next(iter(self._submission_results)))
+
+    async def _management_stream(self, target, group):
+        getter = (
+            self.ctx.chat.get_stream_by_group_id if group else self.ctx.chat.get_stream_by_user_id
+        )
+        result = await getter(target)
+        stream = (
+            result.get("stream")
+            if isinstance(result, dict) and result.get("success") is not False
+            else None
+        )
+        if not isinstance(stream, dict):
+            return None
+        sid = stream.get("session_id")
+        if (
+            not text(sid, 128)
+            or stream.get("platform") != "qq"
+            or stream.get("is_group_session") is not group
+            or str(stream.get("group_id" if group else "user_id") or "") != target
+            or (stream.get("account_id") and stream["account_id"] != self._bot_qq)
+        ):
+            return None
+        name = (
+            stream.get("group_name")
+            if group
+            else stream.get("user_cardname") or stream.get("user_nickname")
+        )
+        return {"session": sid, "name": name[:80] if text(name, 500) else "未命名聊天"}
+
+    async def management_change(self, action, target, session, revision, at="", zone="", intent=""):
+        try:
+            if (
+                not text(target, 128)
+                or not text(session, 128)
+                or not text(revision, 64)
+                or any(not isinstance(v, str) for v in (at, zone, intent))
+            ):
+                raise ValueError("invalid_management_request")
+            async with asyncio.timeout(7):
+                async with self._wake_lock:
+                    if target not in {str(v).strip() for v in self.config.target.allowed_friends}:
+                        raise ValueError("private_chat_not_authorized")
+                    epoch = self._management_epoch
+                    resolved = await self._management_stream(target, False)
+                    if self._management_epoch != epoch:
+                        raise ValueError("stale_wake_revision")
+                    if not resolved or resolved["session"] != session:
+                        raise ValueError("session_changed")
+                    row = self._change_wake_locked(
+                        action, target, session, at, zone, intent, revision=revision, partial=True
+                    )
+                    label = (
+                        "已保存预约"
+                        if action == "set"
+                        else "已取消待执行预约"
+                        if row and row["status"] == "cancelled"
+                        else "没有待取消预约，状态未改变"
+                    )
+                    self._management_operation = (
+                        label + " · " + resolved["name"] + " · " + local_time(time.time())
+                    )
+                    return {"success": True, "message": self._management_operation}
+        except (ValueError, OSError, TimeoutError) as exc:
+            code = str(exc)
+            detail = ERRORS.get(
+                code,
+                "预约存储或会话查询不可用，状态未确认"
+                if isinstance(exc, (OSError, TimeoutError))
+                else "参数或预约索引无效，未覆盖原状态",
+            )
+            self._management_operation = "操作未完成：" + detail
+            self.ctx.logger.warning("主动唤醒管理：%s", detail)
+            raise ValueError(detail) from None
+
+    async def management_snapshot(self):
+        async with asyncio.timeout(7):
+            async with self._wake_lock:
+                data = self._get_wakes().read()
+                epoch = self._management_epoch
+                now, cfg = time.time(), self.config.scheduler
+                running = self._scheduler_task is not None and not self._scheduler_task.done()
+                enabled = self._automatic_enabled() and self._wake_ready and running
+                opening = next_activity(now, cfg.start_time, cfg.end_time)
+                targets = [(True, str(t).strip()) for t in self.config.target.allowed_groups] + [
+                    (False, str(t).strip()) for t in self.config.target.allowed_friends
+                ]
+                targets = list(dict.fromkeys((g, t) for g, t in targets if text(t, 128)))
+                truncated = len(targets) > 128
+                base, reservations, current_private = [], [], set()
+                for group, target in targets[:128]:
+                    stream = await self._management_stream(target, group)
+                    if epoch != self._management_epoch:
+                        raise ValueError("配置或生命周期已改变，请刷新")
+                    # Configuration can change while the Host query is in flight.
+                    allowed = (
+                        self.config.target.allowed_groups
+                        if group
+                        else self.config.target.allowed_friends
+                    )
+                    if target not in {str(v).strip() for v in allowed}:
+                        continue
+                    state = self._states.get((group, target))
+                    if state and (not stream or state.stream_id != stream["session"]):
+                        state = None
+                    row = None if group else data["slots"].get(target)
+                    if not group and stream:
+                        current_private.add(target)
+                    observation = self._observations.get((group, target), {})
+                    if not stream or observation.get("session") != stream["session"]:
+                        observation = {}
+                    cooldown = max(
+                        (state.last_proactive_time if state else 0)
+                        + cfg.min_interval_between_chats * 60,
+                        self._guard_until(row) if row else 0,
+                    )
+                    last_message = observation.get("last_message")
+                    isolation = (
+                        last_message + cfg.isolation_time * 60
+                        if last_message is not None and cfg.isolation_time > 0
+                        else 0
+                    )
+                    pending = row is not None and row["status"] in PENDING
+                    reason = (
+                        "由预约接管"
+                        if pending
+                        else "插件或调度已关闭"
+                        if not enabled
+                        else "真实会话未就绪"
+                        if not stream
+                        else "活动时段外"
+                        if opening > now
+                        else "最小间隔未到"
+                        if cooldown > now
+                        else "真人静默期未到"
+                        if isolation > now
+                        else "等待基础周期检查"
+                    )
+                    last = self._submission_results.get((group, target))
+                    if not stream or (last and last.get("session") != stream["session"]):
+                        last = None
+                    last_text = (
+                        (
+                            local_time(last["at"])
+                            + " · "
+                            + STATUSES.get(last["status"], last["status"])
+                        )
+                        if last
+                        else "尚无本进程提交记录"
+                    )
+                    if row and row["attempted"] and (not last or row["attempted"] > last["at"]):
+                        old_outcome = (
+                            row["status"]
+                            if row["status"] in {"submitted", "rejected", "unknown"}
+                            else ""
+                        )
+                        outcome = STATUSES.get(
+                            row.get("last_outcome", old_outcome), "此前预约尝试，旧版未保留结果"
+                        )
+                        last_text = local_time(row["attempted"]) + " · " + outcome
+                    base.append(
+                        {
+                            "chat": (stream["name"] if stream else "会话未就绪")
+                            + ("（群聊）" if group else "（私聊）")
+                            + " · "
+                            + target,
+                            "kind": "群聊" if group else "私聊",
+                            "state": reason,
+                            "next": "由预约接管"
+                            if pending
+                            else local_time(self._next_regular_at)
+                            if enabled and stream and self._next_regular_at
+                            else "正在检查"
+                            if enabled and stream
+                            else "—",
+                            "rules": cfg.start_time
+                            + "–"
+                            + cfg.end_time
+                            + f" · {cfg.check_interval}±{cfg.jitter}分钟 · 概率{cfg.probability:g}",
+                            "guard": (
+                                "冷却至 " + local_time(cooldown) if cooldown > now else "冷却已满足"
+                            )
+                            + (
+                                "；上次检查静默至 " + local_time(isolation)
+                                if isolation > now
+                                else "；静默未要求"
+                                if cfg.isolation_time == 0
+                                else "；静默由下次实际检查核验"
+                            ),
+                            "last": last_text,
+                        }
+                    )
+                    if group or not stream:
+                        continue
+                    active_row = row if row and row["session"] == stream["session"] else None
+                    earliest = (
+                        next_activity(
+                            max(
+                                row["due"],
+                                row["retry"],
+                                cooldown,
+                                isolation,
+                                data["last_dispatch"] + 60,
+                                now,
+                            ),
+                            cfg.start_time,
+                            cfg.end_time,
+                        )
+                        if active_row and pending
+                        else None
+                    )
+                    can_save = enabled and self._wake_ready
+                    reservations.append(
+                        {
+                            "chat": stream["name"] + " · " + target,
+                            "target": target,
+                            "session": stream["session"],
+                            "revision": wake_revision(target, stream["session"], row),
+                            "at": active_row["at"] if active_row else "—",
+                            "zone": active_row["timezone"] if active_row else "—",
+                            "intent": active_row["intent"] if active_row else "—",
+                            "preview": active_row["intent"][:32]
+                            + ("…" if len(active_row["intent"]) > 32 else "")
+                            if active_row
+                            else "—",
+                            "status": STATUSES.get(active_row["status"], "无预约")
+                            if active_row
+                            else "旧会话预约不再适用"
+                            if row
+                            else "无预约",
+                            "reason": REASONS.get(active_row["block"], "未知阻挡原因")
+                            if active_row
+                            else "—",
+                            "earliest": local_time(max(now, earliest))
+                            if earliest and enabled
+                            else "调度关闭，保留预约"
+                            if earliest
+                            else "—",
+                            "last": last_text,
+                            "cannot_save": not can_save,
+                            "cannot_cancel": not self._wake_ready
+                            or not active_row
+                            or active_row["status"] not in PENDING,
+                        }
+                    )
+                hidden = [
+                    {
+                        "chat": "已撤权或失效目标 · " + target,
+                        "status": "已停止调度"
+                        if row["status"] in PENDING
+                        else STATUSES[row["status"]],
+                        "reason": "不展示旧意图；保留原记录",
+                    }
+                    for target, row in data["slots"].items()
+                    if target not in current_private
+                ]
+                return {
+                    "base": base,
+                    "reservations": reservations,
+                    "inactive": hidden,
+                    "state": "自动调度运行中" if enabled else "自动调度已关闭或未运行",
+                    "deadline": local_time(self._next_regular_at) if enabled else "—",
+                    "pass": local_time(self._next_pass_at) if enabled else "—",
+                    "phase": {
+                        "stopped": "已停止",
+                        "starting": "等待首次检查",
+                        "resolving": "解析真实目标",
+                        "checking": "检查中",
+                        "waiting": "等待下次检查",
+                        "unresolved": "等待会话就绪",
+                        "error": "检查异常，等待恢复",
+                    }.get(self._scheduler_phase, "未知"),
+                    "limits": "已显示前128个授权目标"
+                    if truncated
+                    else f"{len(base)}个基础目标 · {len(reservations)}个可查看私聊",
+                    "operation": self._management_operation,
+                    "rules": cfg.start_time
+                    + "–"
+                    + cfg.end_time
+                    + f" · 周期{cfg.check_interval}±{cfg.jitter}分钟 · 概率{cfg.probability:g} · 最小间隔{cfg.min_interval_between_chats}分钟 · 静默{cfg.isolation_time}分钟",
+                }

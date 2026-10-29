@@ -88,6 +88,13 @@ class WakeStore:
                 or not text(row.get("block"), 64, empty=True)
                 or not text(row.get("task"), 160, empty=True)
                 or type(row.get("shown")) is not bool
+                or (
+                    "last_outcome" in row
+                    and (
+                        not isinstance(row["last_outcome"], str)
+                        or row["last_outcome"] not in {"submitted", "rejected", "unknown"}
+                    )
+                )
                 or any(not number(row.get(k)) for k in ("due", "retry", "attempted"))
             ):
                 raise ValueError("invalid_wake_record")
@@ -127,9 +134,13 @@ class WakeStore:
         if changed:
             self.write(data)
 
-    def set(self, data, target, session, at, zone, intent, now):
-        due, normalized = parse_appointment(at, zone, intent, now)
+    def set(self, data, target, session, at, zone, intent, now, *, keep_time=False):
         old = data["slots"].get(target, {})
+        if keep_time and (
+            old.get("status") not in PENDING or old.get("session") != session or at != old["at"]
+        ):
+            raise ValueError("stale_wake_revision")
+        due, normalized = parse_appointment(at, zone, intent, old["due"] - 60 if keep_time else now)
         if target not in data["slots"] and len(data["slots"]) >= MAX_TARGETS:
             raise ValueError("wake_index_full")
         row = {
@@ -146,6 +157,10 @@ class WakeStore:
             "task": "",
             "shown": False,
         }
+        if "last_outcome" in old:
+            row["last_outcome"] = old["last_outcome"]
         data["slots"][target] = row
+        if keep_time:
+            row.update(status=old["status"], retry=old["retry"], block=old["block"])
         self.write(data)
         return row

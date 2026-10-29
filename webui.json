@@ -1,0 +1,107 @@
+{
+  "schema_version": 2,
+  "required_capabilities": ["declarative_basic"],
+  "workspace_title": "主动唤醒",
+  "pages": [{
+    "id": "manage",
+    "title": "主动唤醒管理",
+    "description": "查看真实检查时刻，管理已授权私聊的下一次自主预约。到点交给Planner判断，可不发言。",
+    "placement": "sidebar",
+    "icon": "list",
+    "mode": "declarative",
+    "poll_interval_seconds": 0,
+    "queries": {"overview": {"api": "wake_overview", "parameters": {}}},
+    "actions": {
+      "save": {
+        "api": "wake_save",
+        "confirmation": "将表单保存到当前选中的私聊，并替换它的待执行预约？已有防重间隔会保留。",
+        "parameters": {
+          "target": {"type": "string", "required": true, "max_length": 128},
+          "session": {"type": "string", "required": true, "max_length": 128},
+          "revision": {"type": "string", "required": true, "max_length": 64},
+          "at": {"type": "string", "max_length": 64},
+          "timezone": {"type": "string", "max_length": 64},
+          "intent": {"type": "string", "max_length": 240}
+        },
+        "arguments": {
+          "target": {"scope": "selection", "source": "private", "field": "target"},
+          "session": {"scope": "selection", "source": "private", "field": "session"},
+          "revision": {"scope": "selection", "source": "private", "field": "revision"}
+        }
+      },
+      "cancel": {
+        "api": "wake_cancel",
+        "confirmation": "取消这个私聊尚未提交的预约？恢复默认周期检查，保留已有防重间隔。",
+        "parameters": {
+          "target": {"type": "string", "required": true, "max_length": 128},
+          "session": {"type": "string", "required": true, "max_length": 128},
+          "revision": {"type": "string", "required": true, "max_length": 64}
+        },
+        "arguments": {
+          "target": {"scope": "selection", "source": "private", "field": "target"},
+          "session": {"scope": "selection", "source": "private", "field": "session"},
+          "revision": {"scope": "selection", "source": "private", "field": "revision"}
+        }
+      }
+    },
+    "content": [
+      {"type": "grid", "columns": 3, "children": [
+        {"type": "text", "label": "自动调度", "value": {"source": "overview", "field": "state"}},
+        {"type": "text", "label": "基础周期下次实际检查", "value": {"source": "overview", "field": "deadline"}},
+        {"type": "text", "label": "唯一调度器下次检查（含预约）", "value": {"source": "overview", "field": "pass"}}
+      ]},
+      {"type": "stack", "label": "基础周期检查", "children": [
+        {"type": "text", "value": {"source": "overview", "field": "phase"}},
+        {"type": "text", "label": "当前基础规则 · 服务器时区", "value": {"source": "overview", "field": "rules"}},
+        {"type": "table", "selection": "basic", "detail": "basic-details", "value": {"source": "overview", "field": "base"}, "columns": [
+          {"field": "chat", "label": "聊天"},
+          {"field": "state", "label": "状态"}, {"field": "next", "label": "下次检查"}
+        ]},
+        {"type": "text", "value": "点击行查看冷却、静默与最近提交结果。待执行预约接管对应私聊，不与基础周期重复唤醒。基础参数入口：插件管理 → Neko Proactive Mai → 配置。"}
+      ]},
+      {"type": "stack", "label": "自主预约 · 选择一个私聊管理", "children": [
+        {"type": "text", "value": "点击聊天行查看详情、新建或修改预约。空表表示当前没有已授权且可解析的私聊；这里不能添加好友或群。"},
+        {"type": "table", "selection": "private", "detail": "edit", "value": {"source": "overview", "field": "reservations"}, "columns": [
+          {"field": "chat", "label": "私聊"}, {"field": "at", "label": "预约时间"},
+          {"field": "status", "label": "状态"}, {"field": "preview", "label": "意图"}
+        ]},
+        {"type": "text", "value": "预约仍受活动时段、最小间隔、真人静默和最新授权约束。阻挡时每分钟检查，最多等待24小时；重载时错过的预约不补执行。宿主接收只表示任务入队，不等于QQ送达。"}
+      ]},
+      {"type": "text", "label": "最近管理操作（刷新查看最新诊断）", "value": {"source": "overview", "field": "operation"}},
+      {"type": "text", "value": {"source": "overview", "field": "limits"}},
+      {"type": "dialog", "name": "basic-details", "label": "基础检查详情", "children": [
+        {"type": "text", "label": "真实聊天", "value": {"scope": "selection", "source": "basic", "field": "chat"}},
+        {"type": "text", "label": "当前状态", "value": {"scope": "selection", "source": "basic", "field": "state"}},
+        {"type": "text", "label": "下次基础检查", "value": {"scope": "selection", "source": "basic", "field": "next"}},
+        {"type": "text", "label": "活动时段 / 周期 / 概率", "value": {"scope": "selection", "source": "basic", "field": "rules"}},
+        {"type": "text", "label": "冷却 / 静默", "value": {"scope": "selection", "source": "basic", "field": "guard"}},
+        {"type": "text", "label": "最近提交结果", "value": {"scope": "selection", "source": "basic", "field": "last"}}
+      ]},
+      {"type": "collapsible", "label": "已撤权 / 会话失效的留存记录", "children": [
+        {"type": "table", "value": {"source": "overview", "field": "inactive"}, "columns": [
+          {"field": "chat", "label": "目标"}, {"field": "status", "label": "状态"}, {"field": "reason", "label": "处理"}
+        ]}
+      ]},
+      {"type": "dialog", "name": "edit", "label": "管理私聊预约", "children": [
+        {"type": "text", "label": "当前私聊", "value": {"scope": "selection", "source": "private", "field": "chat"}},
+        {"type": "grid", "columns": 2, "children": [
+          {"type": "text", "label": "状态", "value": {"scope": "selection", "source": "private", "field": "status"}},
+          {"type": "text", "label": "当前时区", "value": {"scope": "selection", "source": "private", "field": "zone"}}
+        ]},
+        {"type": "text", "label": "原预约时刻", "value": {"scope": "selection", "source": "private", "field": "at"}},
+        {"type": "text", "label": "原意图 / 依据", "value": {"scope": "selection", "source": "private", "field": "intent"}},
+        {"type": "text", "label": "最近提交结果", "value": {"scope": "selection", "source": "private", "field": "last"}},
+        {"type": "text", "label": "阻挡或终止原因", "value": {"scope": "selection", "source": "private", "field": "reason"}},
+        {"type": "text", "label": "规则最早允许再检查", "value": {"scope": "selection", "source": "private", "field": "earliest"}},
+        {"type": "text", "value": "待执行预约留空沿用原值，可只改意图。新建或终态后另建填全三项：未来60秒至7天、带UTC偏移的ISO8601、匹配IANA时区、1～240字意图；新预约保留防重间隔。"},
+        {"type": "input", "name": "at", "label": "新时刻 · 例如2026-11-01T09:00:00+08:00", "value": ""},
+        {"type": "input", "name": "timezone", "label": "IANA时区 · 例如Asia/Shanghai", "value": ""},
+        {"type": "input", "name": "intent", "label": "新意图 / 依据 · 最多240字符", "value": ""},
+        {"type": "grid", "columns": 2, "children": [
+          {"type": "button", "label": "保存预约", "action": "save", "disabled_when": {"reference": {"scope": "selection", "source": "private", "field": "cannot_save"}, "operator": "truthy"}, "disabled_reason": "插件或调度未运行，不能保存新预约"},
+          {"type": "button", "label": "取消待执行预约", "action": "cancel", "variant": "danger", "disabled_when": {"reference": {"scope": "selection", "source": "private", "field": "cannot_cancel"}, "operator": "truthy"}, "disabled_reason": "当前没有可取消的待执行预约"}
+        ]}
+      ]}
+    ]
+  }]
+}

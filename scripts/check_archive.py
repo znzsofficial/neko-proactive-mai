@@ -18,6 +18,8 @@ FILES = (
     "bilibili_bridge.py",
     "prompt_visibility.py",
     "wake_store.py",
+    "webui.py",
+    "webui.json",
     "README.md",
     "LICENSE",
     "NOTICE.md",
@@ -54,6 +56,9 @@ def main():
             "lonelymai_latest_replyer_task",
             "lonelymai_life_receipt",
             "neko_proactive_wake",
+            "wake_overview",
+            "wake_save",
+            "wake_cancel",
         } <= names
         assert not (extracted / "config.toml").exists()
         print("Source archive extracted; SDK discovers plugin factory/config without local config")
