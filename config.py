@@ -25,7 +25,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.3.1", description="插件版本，由维护流程更新，无需手改")
+    version: str = Field(default="2.4.0", description="插件版本，由维护流程更新，无需手改")
 
 
 class SchedulerSection(PluginConfigBase):
@@ -55,7 +55,7 @@ class SchedulerSection(PluginConfigBase):
     )
     min_interval_between_chats: int = Field(
         default=60,
-        description="同一目标两次自动任务被宿主接受的最小间隔（分钟），不是QQ发送间隔；冷却不跨完整重载持久化",
+        description="同一目标两次自动任务被宿主接受的最小间隔（分钟），不是QQ发送间隔；普通周期冷却仅内存，私聊预约提交防重间隔持久化",
     )
     isolation_time: int = Field(
         default=15,

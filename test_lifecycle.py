@@ -3,6 +3,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock
 
@@ -24,6 +25,11 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
             ctx = types.SimpleNamespace(logger=Mock())
 
         bot = object.__new__(TestBot)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        bot.ctx.paths = types.SimpleNamespace(data_dir=directory.name)
+        bot._wakes = None
+        bot._wake_ready = False
         bot.config.plugin.enabled = False
         bot._scheduler_task = None
         bot._lifecycle_lock = asyncio.Lock()

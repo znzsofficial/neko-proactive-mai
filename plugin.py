@@ -10,14 +10,16 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+import json
 from datetime import datetime, time as datetime_time
 from typing import Dict, Optional, Tuple
 
-from maibot_sdk import Command, HookHandler, MaiBotPlugin
-from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
+from maibot_sdk import Command, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo
 
 from .config import GROUP_PROACTIVE_INTENT, PRIVATE_PROACTIVE_INTENT, LonelyMaiConfig
 from .prompt_visibility import filter_request, pending_offers, inject_offers
+from .wake_store import CONTRACT, PENDING, WakeStore, text
 
 
 # ==================== 工具函数 ====================
@@ -59,13 +61,20 @@ class LonelyMaiPlugin(MaiBotPlugin):
         self._bot_qq: str = ""
         self._lifecycle_lock = asyncio.Lock()
         self._life = None
+        self._wake_lock = asyncio.Lock()
+        self._wake_event = asyncio.Event()
+        self._wakes = None
+        self._wake_ready = False
 
     # ========== 生命周期 ==========
 
     async def on_load(self) -> None:
+        self._get_wakes().recover(time.time())
+        self._wake_ready = True
         await self._sync_scheduler()
 
     async def on_unload(self) -> None:
+        self._wake_ready = False
         async with self._lifecycle_lock:
             await self._stop_scheduler()
         self.ctx.logger.info("Neko Proactive Mai 已卸载")
@@ -163,6 +172,192 @@ class LonelyMaiPlugin(MaiBotPlugin):
 
     # ========== 调度循环 ==========
 
+    def _get_wakes(self):
+        if self._wakes is None:
+            self._wakes = WakeStore(self.ctx.paths.data_dir)
+        return self._wakes
+
+    def _automatic_enabled(self):
+        return self.config.plugin.enabled and self.config.scheduler.enabled
+
+    def _guard_until(self, row):
+        return row["attempted"] + max(60, self.config.scheduler.min_interval_between_chats * 60)
+
+    @Tool(
+        "neko_proactive_wake",
+        brief_description="管理当前授权私聊的下次自主唤醒：查看、预约/改期、取消；不是定点提醒。",
+        detailed_description="set替换唯一预约，at为含UTC偏移的ISO8601，timezone为匹配的IANA时区，intent写简短意图/依据。60秒至7天内；到点仍检查时段/冷却，可不发言。",
+        parameters=[
+            ToolParameterInfo(
+                name="action", description="get/set/cancel", enum_values=["get", "set", "cancel"]
+            ),
+            ToolParameterInfo(
+                name="at", description="绝对时刻，如2026-11-01T09:00:00+08:00", required=False
+            ),
+            ToolParameterInfo(
+                name="timezone", description="IANA时区，如Asia/Shanghai", required=False
+            ),
+            ToolParameterInfo(
+                name="intent", description="本次唤醒的简短意图与依据，最多240字符", required=False
+            ),
+        ],
+        platforms=["qq"],
+        chat_scope="private",
+        trusted_context=CONTRACT,
+    )
+    async def private_wake(self, action="get", at="", timezone="", intent="", **kwargs):
+        try:
+            async with self._wake_lock:
+                host = kwargs.get("_host_context")
+                if not self._wake_ready or not self._automatic_enabled():
+                    raise ValueError("wake_disabled")
+                if (
+                    not isinstance(host, dict)
+                    or host.get("contract") != CONTRACT
+                    or host.get("platform") != "qq"
+                    or host.get("group_id")
+                    or not text(host.get("user_id"), 128)
+                    or not text(host.get("session_id"), 128)
+                    or host.get("stream_id") != host["session_id"]
+                    or (host.get("account_id") and host["account_id"] != self._bot_qq)
+                ):
+                    raise ValueError("trusted_private_context_required")
+                target, session = host["user_id"], host["session_id"]
+                state = ChatStreamState(session, target)
+                resolved = await self._resolve_session_id(target, False)
+                if (
+                    not self._wake_ready
+                    or not self._automatic_enabled()
+                    or not self._is_authorized(state, target)
+                    or resolved != session
+                ):
+                    raise ValueError("private_chat_not_authorized")
+                store = self._get_wakes()
+                data = store.read()
+                row = data["slots"].get(target)
+                if row and row["session"] != session and action != "set":
+                    raise ValueError("session_changed")
+                if action == "set":
+                    row = store.set(data, target, session, at, timezone, intent, time.time())
+                elif action == "cancel":
+                    if row and row["status"] in PENDING:
+                        row.update(status="cancelled", block="")
+                        store.write(data)
+                elif action != "get":
+                    raise ValueError("invalid_action")
+                if action != "get":
+                    self._wake_event.set()
+                return {"success": True, "wake": row}
+        except (ValueError, OSError) as exc:
+            return {
+                "success": False,
+                "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
+            }
+
+    async def _run_wakes(self):
+        async with self._wake_lock:
+            if not self._wake_ready or not self._automatic_enabled():
+                return
+            store = self._get_wakes()
+            data = store.read()
+            dispatched = False
+            for target, row in sorted(data["slots"].items(), key=lambda pair: pair[1]["due"]):
+                now = time.time()
+                if row["status"] not in PENDING:
+                    continue
+                state = self._states.get((False, target))
+                if (
+                    not state
+                    or row["session"] != state.stream_id
+                    or not self._is_authorized(state, target)
+                ):
+                    row.update(status="revoked", block="authorization_or_session_changed")
+                    store.write(data)
+                    continue
+                if row["due"] > now or row["retry"] > now:
+                    continue
+                if now - row["due"] >= 86400:
+                    row.update(status="expired", block="blocked_24h")
+                    store.write(data)
+                    continue
+                queried_isolation = self.config.scheduler.isolation_time > 0
+                last = await self._get_last_msg_time(state.stream_id) if queried_isolation else None
+                # Query session fresh; config/lifecycle may change during Host reads.
+                resolved = await self._resolve_session_id(target, False)
+                if not self._wake_ready or not self._automatic_enabled():
+                    return
+                if not self._is_authorized(state, target) or resolved != row["session"]:
+                    row.update(status="revoked", block="authorization_or_session_changed")
+                    store.write(data)
+                    continue
+                # All rule reads occur after async Host lookups, using the latest
+                # config/time. A hot change must not open a stale admission window.
+                cfg, now = self.config.scheduler, time.time()
+                if now - row["due"] >= 86400:
+                    row.update(status="expired", block="blocked_24h")
+                    store.write(data)
+                    continue
+                block = ""
+                if not is_in_time_range(
+                    datetime.fromtimestamp(now).time(),
+                    parse_time(cfg.start_time),
+                    parse_time(cfg.end_time),
+                ):
+                    block = "activity_hours"
+                elif now < max(
+                    self._guard_until(row),
+                    state.last_proactive_time + cfg.min_interval_between_chats * 60,
+                ):
+                    block = "cooldown"
+                elif dispatched or now < data["last_dispatch"] + 60:
+                    block = "dispatch_spacing"
+                elif cfg.isolation_time > 0 and (
+                    not queried_isolation
+                    or (last is not None and now - last < cfg.isolation_time * 60)
+                ):
+                    block = "isolation"
+                if block:
+                    row.update(status="blocked", block=block, retry=now + 60)
+                    store.write(data)
+                    continue
+                # Commit the uncertainty boundary BEFORE any Host submission.
+                # Cancellation, process loss, malformed results never replay this ID.
+                row.update(status="unknown", attempted=now, block="", task="", shown=False)
+                data["last_dispatch"] = now
+                store.write(data)
+                dispatched = True
+                try:
+                    result = await self.ctx.maisaka.proactive.trigger(
+                        stream_id=state.stream_id,
+                        intent=self._intent_for(state),
+                        reason=self.config.intent.reason,
+                        metadata={
+                            "source": "lonelymai",
+                            "target_id": target,
+                            "chat_kind": "private",
+                            "neko_wake_id": row["id"],
+                        },
+                    )
+                    if isinstance(result, dict) and result.get("success") is True:
+                        row["status"] = "submitted"
+                        task = result.get("task_id")
+                        if text(task, 160) and task.startswith("proactive:neko.proactive:"):
+                            row["task"] = task
+                        state.last_proactive_time = now
+                    elif isinstance(result, dict) and result.get("success") is False:
+                        row["status"] = "rejected"
+                except Exception:
+                    self.ctx.logger.warning("私聊预约提交结果未知；不自动重放")
+                store.write(data)
+
+    def _wake_delay(self):
+        now = time.time()
+        rows = self._get_wakes().read()["slots"].values()
+        return min(
+            (max(1, max(r["due"], r["retry"]) - now) for r in rows if r["status"] in PENDING),
+            default=86400,
+        )
+
     def _next_sleep_seconds(self) -> int:
         base_interval = max(1, self.config.scheduler.check_interval)
         jitter = self.config.scheduler.jitter
@@ -172,6 +367,7 @@ class LonelyMaiPlugin(MaiBotPlugin):
         return max(60, actual_minutes * 60)
 
     async def _schedule_loop(self) -> None:
+        next_regular = 0
         while True:
             try:
                 if not self.config.plugin.enabled or not self.config.scheduler.enabled:
@@ -180,11 +376,13 @@ class LonelyMaiPlugin(MaiBotPlugin):
 
                 await self._init_target_streams()
                 if not self._states:
+                    await self._run_wakes()
                     self.ctx.logger.warning("没有可用目标流，15 秒后重新解析")
                     await asyncio.sleep(15)
                     continue
 
-                for state in list(self._states.values()):
+                regular = time.monotonic() >= next_regular
+                for state in list(self._states.values()) if regular else []:
                     target_id = state.target_id
                     allowed = (
                         self.config.target.allowed_groups
@@ -199,10 +397,17 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     except Exception as e:
                         self.ctx.logger.error(f"[{target_id}] 检查异常: {e}", exc_info=True)
 
-                sleep_seconds = self._next_sleep_seconds()
+                if regular:
+                    next_regular = time.monotonic() + self._next_sleep_seconds()
+                await self._run_wakes()
+                sleep_seconds = min(max(1, next_regular - time.monotonic()), self._wake_delay())
                 if self.config.log.scheduler_log:
-                    self.ctx.logger.info(f"[调度器] 下次检查: +{sleep_seconds // 60}min")
-                await asyncio.sleep(sleep_seconds)
+                    self.ctx.logger.info(f"[调度器] 下次检查: +{int(sleep_seconds // 60)}min")
+                self._wake_event.clear()
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=sleep_seconds)
+                except TimeoutError:
+                    pass
 
             except asyncio.CancelledError:
                 break
@@ -211,6 +416,16 @@ class LonelyMaiPlugin(MaiBotPlugin):
                 await asyncio.sleep(60)
 
     async def _check_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
+        if not state.is_group:
+            async with self._wake_lock:
+                row = self._get_wakes().read()["slots"].get(target_id)
+                if row and (row["status"] in PENDING or time.time() < self._guard_until(row)):
+                    return
+                await self._check_default_and_trigger(state, target_id)
+            return
+        await self._check_default_and_trigger(state, target_id)
+
+    async def _check_default_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
         cfg = self.config
         now = datetime.now()
         current_time = now.time()
@@ -368,9 +583,77 @@ class LonelyMaiPlugin(MaiBotPlugin):
                     )
             except Exception:
                 pass  # Source outage never grants another chat or resurrects material.
-        if removed or offers or bili_offers:
+        wake_items = await self._wake_prompt(kwargs)
+        if wake_items:
+            modified["items"] = [*modified.get("items", []), *wake_items]
+        if removed or offers or bili_offers or wake_items:
             return {"action": "continue", "modified_kwargs": modified}
         return None
+
+    async def _wake_prompt(self, kwargs):
+        from .prompt_visibility import EPHEMERAL, route_scopes, task_record
+        from datetime import timezone
+
+        if not self._wake_ready or not self._automatic_enabled():
+            return []
+        try:
+            async with self._wake_lock:
+                store = self._get_wakes()
+                data, scopes = store.read(), route_scopes(kwargs)
+                items = kwargs.get("items")
+                if not isinstance(items, list):
+                    return []
+                for item in reversed(items):
+                    record = task_record(item)
+                    if not record or not record["wake"]:
+                        continue
+                    scope = record["scope"] or kwargs.get("session_id", "")
+                    for target, row in data["slots"].items():
+                        state = self._states.get((False, target))
+                        if (
+                            scope not in scopes
+                            or row["session"] != scope
+                            or row["id"] != record["wake"]
+                            or row["status"] != "submitted"
+                            or row["task"] != record["task"]
+                            or row["shown"]
+                            or not 0 <= time.time() - row["attempted"] < 180
+                            or state is None
+                            or state.stream_id != scope
+                            or not self._is_authorized(state, target)
+                        ):
+                            continue
+                        row["shown"] = True
+                        store.write(data)
+                        return [
+                            {
+                                "item_type": "SystemMessageItem",
+                                "meta": {
+                                    "item_id": EPHEMERAL + row["id"],
+                                    "logical_turn_id": None,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                                "parts": [
+                                    {
+                                        "type": "text",
+                                        "text": "本轮私聊自主预约意图（不是用户的新消息）："
+                                        + json.dumps(
+                                            {
+                                                "session_id": scope,
+                                                "at": row["at"],
+                                                "timezone": row["timezone"],
+                                                "intent": row["intent"],
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        + "。结合最新上下文判断意图是否过时；可不发言，不承诺提醒已送达。",
+                                    }
+                                ],
+                            }
+                        ]
+        except (ValueError, OSError):
+            self.ctx.logger.warning("私聊预约临时上下文不可用")
+        return []
 
     @HookHandler(
         "maisaka.replyer.before_model_request",

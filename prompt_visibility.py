@@ -58,12 +58,14 @@ def task_record(item, *, legacy=False):
     if receipt is None:
         receipt = re.search(r'"neko_life_receipt_id"\s*:\s*"([a-f0-9]{32})"', text)
     bilibili = re.search(r'<neko_bilibili_offer receipt_id="([a-f0-9]{32})"/>', text)
+    wake = re.search(r'"neko_wake_id"\s*:\s*"([a-f0-9]{32})"', text)
     task_id = re.match(r'<plugin_proactive_task id="([^"]+)"', text)[1]
     return {
         "stamp": int(match[1]),
         "scope": scope,
         "receipt": receipt[1] if receipt else "",
         "bilibili_receipt": bilibili[1] if bilibili else "",
+        "wake": wake[1] if wake else "",
         "task": task_id,
     }
 
@@ -239,7 +241,7 @@ def filter_request(kwargs):
             record = task_record(item, legacy=key == "messages")
             if not record:
                 continue
-            if record["receipt"] or record.get("bilibili_receipt"):
+            if record["receipt"] or record.get("bilibili_receipt") or record.get("wake"):
                 discard.add(index)  # Candidate/control payload never lives in later requests.
                 continue
             scope = record["scope"]

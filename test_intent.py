@@ -3,6 +3,7 @@ import pathlib
 import sys
 import tomllib
 import types
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -34,6 +35,9 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.bot = Bot()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.bot.ctx.paths = types.SimpleNamespace(data_dir=directory.name)
         self.bot.config.plugin.enabled = True
         self.bot.config.target.allowed_groups = ["target", "42"]
         self.bot.config.target.allowed_friends = ["target", "42"]
