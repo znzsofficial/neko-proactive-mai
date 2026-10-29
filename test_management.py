@@ -257,13 +257,17 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.save(at=iso(NOW + 120), timezone="UTC", intent="明确新预约")
         self.assertEqual(self.rows()["friend"]["attempted"], attempted)
         self.assertIn("未知", (await self.selected())["last"])
-        await self.due(120)
-        self.assertEqual(self.rows()["friend"]["block"], "cooldown")
+        await self.due(119)
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+        await self.due(120)
+        self.assertEqual(self.rows()["friend"]["status"], "unknown")
+        self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
 
     async def test_blocked_intent_only_edit_keeps_due_retry_status_and_guard(self):
         await self.reserve()
-        self.state.last_proactive_time = NOW
+        data = self.bot._get_wakes().read()
+        data["last_dispatch"] = NOW + 59
+        self.bot._get_wakes().write(data)
         await self.due()
         before = self.rows()["friend"]
         await self.save(intent="新的依据")
@@ -365,7 +369,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("宿主已拒绝", fresh["last"])
         self.assertEqual(self.rows()["friend"]["attempted"], NOW + 60)
 
-    async def test_later_admission_outside_activity_hours_projects_next_opening_not_previous_day(
+    async def test_plan_admission_outside_default_activity_hours_keeps_actual_due(
         self,
     ):
         self.bot.config.scheduler.start_time = "08:00"
@@ -376,10 +380,10 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.save(at=iso(due), timezone="UTC", intent="明日再考虑")
         selected = await self.selected()
         projected = mod.datetime.fromisoformat(selected["earliest"])
-        self.assertEqual(projected.hour, 8)
-        self.assertGreater(projected.timestamp(), due)
+        self.assertEqual(projected.hour, 2)
+        self.assertEqual(projected.timestamp(), due)
 
-    async def test_admin_waits_for_inflight_submission_then_rejects_its_stale_revision(self):
+    async def test_inflight_submission_rejects_edit_without_blocking_hook_storage_lock(self):
         await self.reserve()
         selected = await self.selected()
         entered, release = asyncio.Event(), asyncio.Event()
@@ -396,12 +400,10 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         change = asyncio.create_task(
             self.save(selected, at=iso(NOW + 180), timezone="UTC", intent="旧页面")
         )
-        await asyncio.sleep(0)
-        self.assertFalse(change.done())
+        with self.assertRaises(ValueError):
+            await asyncio.wait_for(change, timeout=1)
         release.set()
         await trigger
-        with self.assertRaises(ValueError):
-            await change
         self.assertEqual(self.rows()["friend"]["status"], "submitted")
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
 

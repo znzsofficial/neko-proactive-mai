@@ -25,7 +25,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.6.0", description="插件版本，由维护流程更新，无需手改")
+    version: str = Field(default="2.6.1", description="插件版本，由维护流程更新，无需手改")
 
 
 class SchedulerSection(PluginConfigBase):
@@ -33,10 +33,11 @@ class SchedulerSection(PluginConfigBase):
 
     enabled: bool = Field(
         default=True,
-        description="开启本插件自动检查；不控制其他插件独立唤醒或直接发送，手动/saymai另行处理",
+        description="本插件基础检查、单次和重复计划的总暂停开关；不控制其他插件，手动/saymai另行处理",
     )
     start_time: str = Field(
-        default="08:00", description="自动检查的每日开始时间HH:MM，按服务器本地时间；支持跨午夜"
+        default="08:00",
+        description="仅基础检查的每日开始时间HH:MM，按服务器本地时间；不限制明确计划，支持跨午夜",
     )
     end_time: str = Field(
         default="23:00",
@@ -55,7 +56,7 @@ class SchedulerSection(PluginConfigBase):
     )
     min_interval_between_chats: int = Field(
         default=60,
-        description="同一目标两次自动任务被宿主接受的最小间隔（分钟），不是QQ发送间隔；普通周期冷却仅内存，私聊预约提交防重间隔持久化",
+        description="同一目标两次基础任务被宿主接受的最小间隔（分钟），不是QQ发送间隔；仅基础冷却且只在内存，不限制单次/重复计划；计划另有持久60秒安全间距",
     )
     isolation_time: int = Field(
         default=15,

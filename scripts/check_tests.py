@@ -30,6 +30,7 @@ def main():
         "test_chat_sdk",
         "test_repeat",
         "test_repeat_management",
+        "test_plan_dispatch",
     ):
         if not any(name.startswith(module + ".") for name in discovered):
             raise SystemExit("Required proactive test group is empty: " + module)

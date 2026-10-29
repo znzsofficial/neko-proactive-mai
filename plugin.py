@@ -73,6 +73,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         self._submission_results = {}
         self._management_operation = "尚无管理操作"
         self._management_epoch = 0
+        self._wake_inflight = None
 
     # ========== 生命周期 ==========
 
@@ -195,9 +196,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         return self.config.plugin.enabled and self.config.scheduler.enabled
 
     def _guard_until(self, row):
-        return max(row["attempted"], row.get("guard", 0)) + max(
-            60, self.config.scheduler.min_interval_between_chats * 60
-        )
+        return max(row["attempted"], row.get("guard", 0)) + 60
 
     def _target_guard(self, data, target):
         rows = [data["slots"].get(target), data.get("repeats", {}).get(target)]
@@ -206,8 +205,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     @Tool(
         "neko_proactive_wake",
         description="想稍后继续一个具体话题时，为当前私聊预约一次醒来判断。get查看、set设置或替换、cancel取消；at填带偏移的ISO时刻，timezone填IANA时区，intent写为何再来。可以沉默，不是保证送达的提醒；不必每次聊天都预约。持续联系节奏用neko_proactive_repeat。",
-        brief_description="想稍后继续具体话题时，为当前私聊约一次醒来判断：get查看、set设置或替换、cancel取消。at填带偏移ISO时刻，timezone填IANA时区，intent写依据。可不发言，不是保证送达的提醒，不必每次设；持续联系用neko_proactive_repeat。",
-        detailed_description="set替换唯一预约，at为含UTC偏移的ISO8601，timezone为匹配的IANA时区，intent写简短意图/依据。60秒至7天内；到点仍检查时段/冷却，可不发言。",
+        brief_description="想稍后继续具体话题时，为当前私聊约一次醒来判断：get查看、set设置或替换、cancel取消。at填带偏移ISO时刻，timezone填IANA时区，intent写依据。计划不受基础周期时段/冷却/静默限制，只保总开关、授权和60秒安全间距；可不发言，不保证提醒。持续联系用neko_proactive_repeat，不必每次设。",
+        detailed_description="set替换唯一预约，at为含UTC偏移的ISO8601，timezone为匹配的IANA时区，intent写简短意图/依据。60秒至7天内；计划独立于基础周期规则，Host入队不等于Planner执行或QQ送达。",
         parameters=[
             ToolParameterInfo(
                 name="action", description="get/set/cancel", enum_values=["get", "set", "cancel"]
@@ -276,7 +275,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     @Tool(
         "neko_proactive_repeat",
         description="想和当前私聊保持持续联系节奏时设置重复醒来判断，不必每次聊天都设。get查看；set设置/修改唯一计划：interval每隔interval_minutes分钟，或daily在timezone时区每天local_time(HH:MM)；intent写联系的依据。pause暂停、resume从未来继续、delete删除。单次预约优先，可不发言，不是保证送达的提醒；未知不重试。",
-        brief_description="想保持持续联系节奏时，为当前私聊设置重复醒来判断：get查看、set设置/修改、pause暂停、resume未来继续、delete删除。kind=interval按interval_minutes分钟，daily按timezone时区每天local_time(HH:MM)；intent写依据。单次预约优先，可沉默，不必每次设，不是保证提醒。",
+        brief_description="想保持持续联系节奏时，为当前私聊设置重复醒来判断：get查看、set修改、pause暂停、resume未来继续、delete删除。interval按interval_minutes分钟，daily按timezone时区每天local_time(HH:MM)，intent写依据。单次优先；不受基础时段/冷却/静默限制，保留总开关、授权和60秒安全间距，可沉默，不必每次设，不保证提醒。",
         parameters=[
             ToolParameterInfo(
                 name="action",
@@ -423,6 +422,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
         if not self._wake_ready:
             raise ValueError("wake_disabled")
+        if self._wake_inflight == target and action not in ("get", "repeat_get"):
+            raise ValueError("wake_submission_inflight")
         if target not in {str(value).strip() for value in self.config.target.allowed_friends}:
             raise ValueError("private_chat_not_authorized")
         store = self._get_wakes()
@@ -559,7 +560,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     async def _run_wakes(self):
         async with self._wake_lock:
-            if not self._wake_ready or not self._automatic_enabled():
+            if not self._wake_ready or not self._automatic_enabled() or self._wake_inflight:
                 return
             store = self._get_wakes()
             data = store.read()
@@ -612,9 +613,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     row.update(status="expired", block="blocked_24h")
                     store.write(data)
                     continue
-                queried_isolation = self.config.scheduler.isolation_time > 0
-                last = await self._get_last_msg_time(state.stream_id) if queried_isolation else None
-                self._note_check(state, "appointment", last_message=last)
+                self._note_check(state, "appointment")
                 # Query session fresh; config/lifecycle may change during Host reads.
                 resolved = await self._resolve_session_id(target, False)
                 if not self._wake_ready or not self._automatic_enabled():
@@ -627,7 +626,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     continue
                 # All rule reads occur after async Host lookups, using the latest
                 # config/time. A hot change must not open a stale admission window.
-                cfg, now = self.config.scheduler, time.time()
+                now = time.time()
                 if plan and now >= expires(plan):
                     advance(plan, now, "expired", "repeat_window_missed")
                     store.write(data)
@@ -637,26 +636,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     store.write(data)
                     continue
                 block = ""
-                if not is_in_time_range(
-                    datetime.fromtimestamp(now).time(),
-                    parse_time(cfg.start_time),
-                    parse_time(cfg.end_time),
-                ):
-                    block = "activity_hours"
-                elif now < max(
-                    self._target_guard(data, target),
-                    state.last_proactive_time + cfg.min_interval_between_chats * 60,
-                ):
-                    block = "cooldown"
+                if now < self._target_guard(data, target):
+                    block = "safety_spacing"
                 elif dispatched or now < data["last_dispatch"] + 60:
                     block = "dispatch_spacing"
-                elif cfg.isolation_time > 0 and (
-                    not queried_isolation
-                    or (last is not None and now - last < cfg.isolation_time * 60)
-                ):
-                    block = "isolation"
                 if block:
-                    self._note_check(state, block, last_message=last)
+                    self._note_check(state, block)
                     row.update(status="blocked", block=block, retry=now + 60)
                     store.write(data)
                     continue
@@ -677,32 +662,63 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 store.write(data)
                 dispatched = True
                 self._record_submission(state, "unknown", "appointment", now)
+                wake_id = row["id"]
+                intent = self._intent_for(state)
+                reason = self.config.intent.reason
+                self._wake_inflight = target
+                # Host can run our blocking Planner hook before RPC acknowledgement.
+                # Never hold its storage lock across that bidirectional boundary.
+                self._wake_lock.release()
+                result = None
                 try:
                     result = await self.ctx.maisaka.proactive.trigger(
                         stream_id=state.stream_id,
-                        intent=self._intent_for(state),
-                        reason=self.config.intent.reason,
+                        intent=intent,
+                        reason=reason,
                         metadata={
                             "source": "lonelymai",
                             "target_id": target,
                             "chat_kind": "private",
-                            "neko_wake_id": row["id"],
+                            "neko_wake_id": wake_id,
                         },
                     )
-                    if isinstance(result, dict) and result.get("success") is True:
-                        row["status"] = "submitted"
-                        row["last_outcome"] = "submitted"
-                        task = result.get("task_id")
-                        if text(task, 160) and task.startswith("proactive:neko.proactive:"):
-                            row["task"] = task
-                        state.last_proactive_time = now
-                    elif isinstance(result, dict) and result.get("success") is False:
-                        row["status"] = "rejected"
-                        row["last_outcome"] = "rejected"
                 except Exception:
                     self.ctx.logger.warning("私聊预约提交结果未知；不自动重放")
+                finally:
+                    await self._wake_lock.acquire()
+                    self._wake_inflight = None
+                # The hook/another target's admin write can have changed the index.
+                # Reread, update only this immutable occurrence, never stale overwrite.
+                data = store.read()
+                row = self._find_wake(data, target, wake_id)
+                if row is None:
+                    return
+                if isinstance(result, dict) and result.get("success") is True:
+                    row["status"] = "submitted"
+                    row["last_outcome"] = "submitted"
+                    task = result.get("task_id")
+                    if text(task, 160) and task.startswith("proactive:neko.proactive:"):
+                        if not row["task"]:
+                            row["task"] = task
+                elif isinstance(result, dict) and result.get("success") is False:
+                    row["status"] = "rejected"
+                    row["last_outcome"] = "rejected"
                 store.write(data)
                 self._record_submission(state, row["status"], "appointment", now)
+                return  # One admitted Host dispatch per pass; reread next pass.
+
+    @staticmethod
+    def _find_wake(data, target, wake_id):
+        slot = data["slots"].get(target)
+        plan = data.get("repeats", {}).get(target)
+        for row in (
+            slot,
+            slot.get("repeat_last") if slot else None,
+            plan.get("last") if plan else None,
+        ):
+            if row and row["id"] == wake_id:
+                return row
+        return None
 
     def _wake_delay(self):
         now = time.time()
@@ -985,6 +1001,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
         if not self._wake_ready or not self._automatic_enabled():
             return []
+        request_items = kwargs.get("items")
+        if not isinstance(request_items, list) or not any(
+            (record := task_record(item)) and record["wake"] for item in request_items
+        ):
+            return []  # Ordinary/default requests must not wait on plan storage.
         try:
             async with self._wake_lock:
                 store = self._get_wakes()
@@ -1016,8 +1037,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             scope not in scopes
                             or row["session"] != scope
                             or row["id"] != record["wake"]
-                            or row["status"] != "submitted"
-                            or row["task"] != record["task"]
+                            or row["status"] not in ("unknown", "submitted")
+                            or (row["task"] and row["task"] != record["task"])
                             or row["shown"]
                             or not 0 <= time.time() - row["attempted"] < 180
                             or state is None
@@ -1025,7 +1046,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             or not self._is_authorized(state, target)
                         ):
                             continue
+                        row["task"] = record["task"]
                         row["shown"] = True
+                        row["planner_requested_at"] = time.time()
                         store.write(data)
                         return [
                             {

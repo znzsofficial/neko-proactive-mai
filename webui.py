@@ -11,7 +11,7 @@ from .wake_store import PENDING, text
 STATUSES = {
     "scheduled": "待唤醒",
     "blocked": "等待规则放行",
-    "submitted": "宿主已接收",
+    "submitted": "宿主已入队",
     "rejected": "宿主已拒绝",
     "unknown": "提交结果未知",
     "cancelled": "已取消",
@@ -22,6 +22,7 @@ REASONS = {
     "": "—",
     "activity_hours": "活动时段外",
     "cooldown": "最小间隔未到",
+    "safety_spacing": "等待计划60秒安全间距",
     "isolation": "真人静默期未到",
     "dispatch_spacing": "等待预约提交间隔",
     "restart_missed": "重载时已错过，不补执行",
@@ -36,6 +37,7 @@ REASONS = {
     "repeat_deleted": "重复计划已删除",
 }
 ERRORS = {
+    "wake_submission_inflight": "该私聊正在提交Host，稍后刷新核对；不会自动重试",
     "invalid_repeat": "选择固定间隔或每天，并填写联系依据",
     "invalid_repeat_interval": "间隔须为1～10080分钟",
     "invalid_repeat_clock": "每天时刻须为HH:MM，不能同时填写间隔或首次时刻",
@@ -309,6 +311,32 @@ class WakeManagement:
                             row.get("last_outcome", old_outcome), "此前预约尝试，旧版未保留结果"
                         )
                         last_text = local_time(row["attempted"]) + " · " + outcome
+                    execution_rows = [
+                        r
+                        for r in (
+                            row,
+                            row.get("repeat_last") if row else None,
+                            plan["last"] if plan else None,
+                        )
+                        if r and r["attempted"]
+                    ]
+                    latest_execution = max(
+                        execution_rows, key=lambda r: r["attempted"], default=None
+                    )
+                    planner_state = "尚无计划提交记录"
+                    if latest_execution:
+                        planner_state = (
+                            "Planner请求已到达插件Hook · "
+                            + local_time(latest_execution["planner_requested_at"])
+                            if latest_execution.get("planner_requested_at")
+                            else "旧记录显示临时提示已提供，未记录请求时刻"
+                            if latest_execution["shown"]
+                            else "Host已入队，尚未观测到Planner请求"
+                            if latest_execution["status"] == "submitted"
+                            else "Host结果未知，不自动重放"
+                            if latest_execution["status"] == "unknown"
+                            else STATUSES.get(latest_execution["status"], "等待下一轮")
+                        )
                     if (
                         plan
                         and plan["last"]
@@ -372,17 +400,12 @@ class WakeManagement:
                     active_row = row if row and row["session"] == stream["session"] else None
                     active_plan = plan if plan and plan["session"] == stream["session"] else None
                     earliest = (
-                        next_activity(
-                            max(
-                                row["due"],
-                                row["retry"],
-                                cooldown,
-                                isolation,
-                                data["last_dispatch"] + 60,
-                                now,
-                            ),
-                            cfg.start_time,
-                            cfg.end_time,
+                        max(
+                            row["due"],
+                            row["retry"],
+                            self._target_guard(data, target),
+                            data["last_dispatch"] + 60,
+                            now,
                         )
                         if active_row and pending
                         else None
@@ -415,6 +438,10 @@ class WakeManagement:
                             if earliest
                             else "—",
                             "last": last_text,
+                            "planner_state": planner_state,
+                            "plan_safety_until": local_time(self._target_guard(data, target))
+                            if self._target_guard(data, target) > now
+                            else "已满足60秒安全间距",
                             "cannot_save": not can_save,
                             "cannot_cancel": not self._wake_ready
                             or not active_row

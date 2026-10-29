@@ -192,32 +192,24 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(parse_appointment(offset, "Asia/Shanghai", "依据", NOW)[0], NOW + 60)
 
-    async def test_due_bypasses_probability_but_not_hours_cooldown_or_isolation(self):
-        await self.reserve()
+    async def test_five_minute_plan_ignores_all_default_cycle_rules(self):
+        await self.reserve(300)
         cfg = self.bot.config.scheduler
         cfg.probability = 0
-        current = datetime.fromtimestamp(NOW + 60)
+        current = datetime.fromtimestamp(NOW + 300)
         cfg.start_time = cfg.end_time = f"{(current.hour + 1) % 24:02}:00"
-        await self.due()
-        self.assertEqual(self.rows()["friend"]["block"], "activity_hours")
-        cfg.start_time, cfg.end_time = "00:00", "23:59"
         self.state.last_proactive_time = NOW
-        await self.due(120)
-        self.assertEqual(self.rows()["friend"]["block"], "cooldown")
-        self.state.last_proactive_time = 0
+        cfg.min_interval_between_chats = 60
         cfg.isolation_time = 15
-        self.bot._get_last_msg_time = AsyncMock(return_value=NOW + 179)
-        await self.due(180)
-        self.assertEqual(self.rows()["friend"]["block"], "isolation")
-        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
-        cfg.isolation_time = 0
-        await self.due(240)
+        self.bot._get_last_msg_time = AsyncMock(return_value=NOW + 299)
+        await self.due(300)
         self.assertEqual(self.rows()["friend"]["status"], "submitted")
+        self.assertEqual(self.rows()["friend"]["attempted"], NOW + 300)
+        self.bot._get_last_msg_time.assert_not_awaited()
+        self.assertEqual(self.state.last_proactive_time, NOW)
 
     async def test_blocked_task_expires_after_24h_without_calling_model(self):
         await self.reserve()
-        self.state.last_proactive_time = NOW + 86400
-        await self.due(60)
         await self.due(86460)
         self.assertEqual(self.rows()["friend"]["status"], "expired")
         self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
@@ -288,8 +280,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.bot._wakes = WakeStore(self.directory.name)
         self.state.last_proactive_time = 0  # Full process reload lost the old memory cooldown.
-        await self.due(120)
-        self.assertEqual(self.rows()["friend"]["block"], "cooldown")
+        await self.due(119)
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
         await self.tool("cancel")
         await self.bot._check_and_trigger(self.state, "friend")
@@ -306,6 +297,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         await self.reserve()
         await self.due()
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+        await self.due()  # Next pass observes the durable global safety boundary.
         self.assertEqual(self.rows()["other"]["block"], "dispatch_spacing")
         await self.due(119)
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
@@ -484,7 +476,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         await self.due(61)
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
 
-    async def test_minimum_interval_and_isolation_hot_change_checked_after_async_lookup(self):
+    async def test_default_rule_hot_change_does_not_block_explicit_plan(self):
         await self.reserve()
         self.state.last_proactive_time = NOW - 3600
 
@@ -494,7 +486,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
 
         self.bot.ctx.chat.get_stream_by_user_id.side_effect = tighten
         await self.due()
-        self.assertEqual(self.rows()["friend"]["block"], "cooldown")
+        self.assertEqual(self.rows()["friend"]["status"], "submitted")
         self.state.last_proactive_time = 0
 
         async def add_isolation(_):
@@ -503,8 +495,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
 
         self.bot.ctx.chat.get_stream_by_user_id.side_effect = add_isolation
         await self.due(120)
-        self.assertEqual(self.rows()["friend"]["block"], "isolation")
-        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
 
     async def test_unload_during_real_scheduler_dispatch_leaves_durable_unknown(self):
         await self.reserve()

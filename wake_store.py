@@ -47,6 +47,7 @@ def valid_record(row):
         )
         and all(number(row.get(k)) for k in ("due", "retry", "attempted"))
         and ("guard" not in row or number(row["guard"]))
+        and ("planner_requested_at" not in row or number(row["planner_requested_at"]))
         and (
             "repeat_last" not in row
             or (

@@ -110,9 +110,11 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_blocks_skip_by_next_nominal_boundary_without_backlog(self):
         await self.create(2)
-        self.state.last_proactive_time = NOW
+        data = self.bot._get_wakes().read()
+        data["last_dispatch"] = NOW + 119
+        self.bot._get_wakes().write(data)
         await self.due(120)
-        self.assertEqual(self.plan()["current"]["block"], "cooldown")
+        self.assertEqual(self.plan()["current"]["block"], "dispatch_spacing")
         await self.due(245)
         self.assertEqual(self.plan()["last"]["status"], "expired")
         self.assertEqual(self.plan()["last"]["block"], "repeat_window_missed")
@@ -136,7 +138,7 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
         await self.tool("set", at=iso(NOW + 190), timezone="UTC", intent="新的单次")
         await self.due(190)
-        self.assertEqual(self.rows()["friend"]["block"], "cooldown")
+        self.assertEqual(self.rows()["friend"]["status"], "submitted")
 
     async def test_edit_paused_definition_does_not_implicitly_resume(self):
         await self.create(120)
@@ -260,27 +262,28 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((await self.rep("set", **fields))["success"])
             self.assertEqual(self.bot._get_wakes().path.read_bytes(), before)
 
-    async def test_repeat_hours_isolation_and_global_spacing_still_block(self):
+    async def test_repeat_ignores_default_hours_cooldown_and_isolation(self):
         await self.create(10)
         self.bot.config.scheduler.min_interval_between_chats = 0
         now = datetime.fromtimestamp(NOW + 600)
         self.bot.config.scheduler.start_time = self.bot.config.scheduler.end_time = (
             f"{(now.hour + 1) % 24:02}:00"
         )
-        await self.due(600)
-        self.assertEqual(self.plan()["current"]["block"], "activity_hours")
-        self.bot.config.scheduler.start_time, self.bot.config.scheduler.end_time = "00:00", "23:59"
+        self.state.last_proactive_time = NOW + 599
+        self.bot.config.scheduler.min_interval_between_chats = 60
         self.bot.config.scheduler.isolation_time = 5
         self.bot._get_last_msg_time = AsyncMock(return_value=NOW + 659)
-        await self.due(660)
-        self.assertEqual(self.plan()["current"]["block"], "isolation")
-        self.bot.config.scheduler.isolation_time = 0
+        await self.due(600)
+        self.assertEqual(self.plan()["last"]["status"], "submitted")
+        self.bot._get_last_msg_time.assert_not_awaited()
+        self.assertEqual(self.state.last_proactive_time, NOW + 599)
+        # The safety gate remains independent from all default policy fields.
         data = self.bot._get_wakes().read()
-        data["last_dispatch"] = NOW + 719
+        data["last_dispatch"] = NOW + 1199
         self.bot._get_wakes().write(data)
-        await self.due(720)
+        await self.due(1200)
         self.assertEqual(self.plan()["current"]["block"], "dispatch_spacing")
-        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
 
     async def test_capacity_and_corrupt_repeat_index_preserved(self):
         await self.create()
