@@ -230,14 +230,14 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.reserve()
         overview = await self.bot.wake_overview()
         base = next(r for r in overview["base"] if r["kind"] == "私聊" and "friend" in r["chat"])
-        self.assertEqual(base["state"], "由预约接管")
-        self.assertEqual(base["next"], "由预约接管")
+        self.assertEqual(base["state"], "单次预约待执行，基础唤醒暂停")
+        self.assertEqual(base["next"], "单次预约待执行，基础唤醒暂停")
         await self.bot.wake_cancel(**self.identity(await self.selected()))
         self.state.last_proactive_time = NOW
         self.bot.config.scheduler.isolation_time = 15
         self.bot._note_check(self.state, "isolation", last_message=NOW)
         base = next(r for r in (await self.bot.wake_overview())["base"] if "friend" in r["chat"])
-        self.assertNotEqual(base["next"], "由预约接管")
+        self.assertNotEqual(base["next"], "单次预约待执行，基础唤醒暂停")
         self.assertEqual(base["state"], "最小间隔未到")
         self.assertIn("冷却至", base["guard"])
         self.assertIn("静默至", base["guard"])

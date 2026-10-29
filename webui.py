@@ -31,7 +31,7 @@ REASONS = {
     "probability": "本轮概率未命中",
     "checking": "正在检查",
     "eligible": "本轮条件通过",
-    "appointment": "由预约接管",
+    "appointment": "单次预约待执行，基础唤醒暂停",
     "single_priority": "等待单次预约结束",
     "repeat_window_missed": "本次已跳过，等待下一轮",
     "repeat_deleted": "重复计划已删除",
@@ -312,11 +312,11 @@ class WakeManagement:
                         )
                     )
                     reason = (
-                        "由预约接管"
+                        "单次预约待执行，基础唤醒暂停"
                         if pending
                         else "当天事项临近，优先检查"
                         if near_day
-                        else "由重复计划接管"
+                        else "重复计划已启用，基础唤醒暂停"
                         if plan and plan["enabled"]
                         else "插件或调度已关闭"
                         if not enabled
@@ -435,11 +435,11 @@ class WakeManagement:
                             + target,
                             "kind": "群聊" if group else "私聊",
                             "state": reason,
-                            "next": "由预约接管"
+                            "next": "单次预约待执行，基础唤醒暂停"
                             if pending
                             else "当天事项临近，优先检查"
                             if near_day
-                            else "由重复计划接管"
+                            else "重复计划已启用，基础唤醒暂停"
                             if plan and plan["enabled"]
                             else local_time(self._next_regular_at)
                             if enabled and stream and self._next_regular_at

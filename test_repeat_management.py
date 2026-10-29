@@ -1,6 +1,7 @@
 """New admin actions over real PluginContext / raw Host RPC test fixture."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 import unittest
 
 import test_chat_sdk as fixtures
@@ -12,6 +13,18 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.ChatSDKTests.asyncSetUp
     identity = fixtures.ChatSDKTests.identity
     selected = fixtures.ChatSDKTests.selected
+
+    def test_management_copy_explains_pause_recovery_without_changing_schedule(self):
+        document = Path(__file__).with_name("webui.html").read_text(encoding="utf-8")
+        for wording in (
+            "单次预约待执行时，这条私聊暂停基础唤醒",
+            "启用期间由重复计划替代基础周期",
+            "暂停或删除后恢复基础周期",
+            "远期事项不暂停基础周期",
+            "当前唤醒方式",
+        ):
+            self.assertIn(wording, document)
+        self.assertNotIn("由预约接管", document)
 
     async def edit(self, action, row=None, **fields):
         row = await self.selected() if row is None else row
@@ -33,7 +46,10 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
         row = await self.selected()
         self.assertEqual(row["repeat"]["local_time"], "21:00")
         overview = await self.bot.wake_overview()
-        self.assertIn("重复计划", next(r for r in overview["base"] if r["kind"] == "私聊")["state"])
+        self.assertEqual(
+            next(r for r in overview["base"] if r["kind"] == "私聊")["state"],
+            "重复计划已启用，基础唤醒暂停",
+        )
         self.assertTrue((await self.edit("repeat_pause", row))["success"])
         self.assertFalse((await self.edit("repeat_resume", row))["success"])
         self.assertTrue((await self.edit("repeat_resume"))["success"])
@@ -46,7 +62,7 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
             next(r for r in (await self.bot.wake_overview())["base"] if r["kind"] == "私聊")[
                 "state"
             ],
-            "由预约接管",
+            "单次预约待执行，基础唤醒暂停",
         )
         before = self.bot._get_wakes().path.read_bytes()
         await self.bot.wake_overview()
