@@ -105,11 +105,12 @@ class WakeManagement:
             self.ctx.chat.get_stream_by_group_id if group else self.ctx.chat.get_stream_by_user_id
         )
         result = await getter(target)
-        stream = (
-            result.get("stream")
-            if isinstance(result, dict) and result.get("success") is not False
-            else None
-        )
+        if not isinstance(result, dict) or result.get("success") is False:
+            return None
+        # PluginContext normalizes Host {success, stream} into the stream itself.
+        # Keep explicit-envelope compatibility, without treating stream=None as
+        # permission to guess a target or accepting a failed Host response.
+        stream = result.get("stream", result if "session_id" in result else None)
         if not isinstance(stream, dict):
             return None
         sid = stream.get("session_id")
@@ -118,7 +119,8 @@ class WakeManagement:
             or stream.get("platform") != "qq"
             or stream.get("is_group_session") is not group
             or str(stream.get("group_id" if group else "user_id") or "") != target
-            or (stream.get("account_id") and stream["account_id"] != self._bot_qq)
+            or not text(self._bot_qq, 128)
+            or stream.get("account_id") != self._bot_qq
         ):
             return None
         name = (

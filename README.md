@@ -2,6 +2,8 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+2.5.1：修复管理页解析真实SDK会话结果的层级错误。PluginContext已将Host的`{success,stream}`规范化为直接会话字典，管理页不再重复取stream而把目标全部判为未就绪；同时兼容显式stream信封并拒绝失败/未找到结果。平台、账号、群私类型、名单和session复查保留，缺失或不匹配的账号拒绝。新增真实PluginContext＋底层原始Host RPC信封回归，覆盖2群/1私读取与预约管理。2.5.0的Host网关隔离测试没有覆盖chat SDK规范化边界，不能当作该边界已验证。
+
 2.5.0：新增原生WebUI「主动唤醒管理」页（`/extensions/neko.proactive/manage`），同页查看基础检查、规则阻挡、私聊预约与最近提交结果，支持管理员新建、改期/替换、修改意图和确认取消。复用原调度器、WakeStore和模型工具的同一锁内业务，不增加试发或重放入口；管理API明确`public=False`，仅走宿主登录认证的插件扩展网关，不对其他插件`api.call`开放。原私聊意图/Planner模板、群聊周期和所有数值配置保持。
 
 2.4.0：新增当前授权私聊的单条自主唤醒预约。Planner用`neko_proactive_wake`查看、设置/改期、取消；预约复用唯一调度器，等待期间不再被普通私聊周期提前打断。到点只重新交给Planner判断，可不发言，不是可靠定点提醒。无需更改现有意图、时段、频率、名单、模型或人设。新增工具依赖宿主已具备的`neko.tools.context.v1`可信身份桥（维护fork已包含）；缺真实私聊上下文时拒绝，不使用模型自报目标。
@@ -59,7 +61,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.5.0"
+version = "2.5.1"
 
 [scheduler]
 enabled = true

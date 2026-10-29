@@ -27,6 +27,7 @@ def main():
         "test_bilibili_bridge",
         "test_wakes",
         "test_management",
+        "test_chat_sdk",
     ):
         if not any(name.startswith(module + ".") for name in discovered):
             raise SystemExit("Required proactive test group is empty: " + module)
