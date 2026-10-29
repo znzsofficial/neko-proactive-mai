@@ -15,7 +15,7 @@ from datetime import datetime, time as datetime_time
 from typing import Dict, Optional, Tuple
 
 from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, Tool
-from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 from .config import GROUP_PROACTIVE_INTENT, PRIVATE_PROACTIVE_INTENT, LonelyMaiConfig
 from .prompt_visibility import filter_request, pending_offers, inject_offers
@@ -195,11 +195,18 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         return self.config.plugin.enabled and self.config.scheduler.enabled
 
     def _guard_until(self, row):
-        return row["attempted"] + max(60, self.config.scheduler.min_interval_between_chats * 60)
+        return max(row["attempted"], row.get("guard", 0)) + max(
+            60, self.config.scheduler.min_interval_between_chats * 60
+        )
+
+    def _target_guard(self, data, target):
+        rows = [data["slots"].get(target), data.get("repeats", {}).get(target)]
+        return max((self._guard_until(row) for row in rows if row), default=0)
 
     @Tool(
         "neko_proactive_wake",
-        brief_description="管理当前授权私聊的下次自主唤醒：查看、预约/改期、取消；不是定点提醒。",
+        description="想稍后继续一个具体话题时，为当前私聊预约一次醒来判断。get查看、set设置或替换、cancel取消；at填带偏移的ISO时刻，timezone填IANA时区，intent写为何再来。可以沉默，不是保证送达的提醒；不必每次聊天都预约。持续联系节奏用neko_proactive_repeat。",
+        brief_description="想稍后继续具体话题时，为当前私聊约一次醒来判断：get查看、set设置或替换、cancel取消。at填带偏移ISO时刻，timezone填IANA时区，intent写依据。可不发言，不是保证送达的提醒，不必每次设；持续联系用neko_proactive_repeat。",
         detailed_description="set替换唯一预约，at为含UTC偏移的ISO8601，timezone为匹配的IANA时区，intent写简短意图/依据。60秒至7天内；到点仍检查时段/冷却，可不发言。",
         parameters=[
             ToolParameterInfo(
@@ -247,15 +254,169 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 ):
                     raise ValueError("private_chat_not_authorized")
                 row = self._change_wake_locked(action, target, session, at, timezone, intent)
-                return {"success": True, "wake": row}
+                return {
+                    "success": True,
+                    "wake": row,
+                    "message": {
+                        "get": "当前单次预约",
+                        "set": "已设置下次醒来判断，替换旧单次预约",
+                        "cancel": "待执行单次预约已取消；已接收任务不会撤回",
+                    }[action],
+                    "next_at": row["at"] if row and row["status"] in PENDING else None,
+                }
         except (ValueError, OSError) as exc:
+            from .webui import ERRORS
+
             return {
                 "success": False,
                 "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
+                "message": ERRORS.get(str(exc), "单次预约未完成，请核对当前私聊、时刻、时区和依据"),
             }
 
+    @Tool(
+        "neko_proactive_repeat",
+        description="想和当前私聊保持持续联系节奏时设置重复醒来判断，不必每次聊天都设。get查看；set设置/修改唯一计划：interval每隔interval_minutes分钟，或daily在timezone时区每天local_time(HH:MM)；intent写联系的依据。pause暂停、resume从未来继续、delete删除。单次预约优先，可不发言，不是保证送达的提醒；未知不重试。",
+        brief_description="想保持持续联系节奏时，为当前私聊设置重复醒来判断：get查看、set设置/修改、pause暂停、resume未来继续、delete删除。kind=interval按interval_minutes分钟，daily按timezone时区每天local_time(HH:MM)；intent写依据。单次预约优先，可沉默，不必每次设，不是保证提醒。",
+        parameters=[
+            ToolParameterInfo(
+                name="action",
+                description="get查看、set设置/修改、pause暂停、resume继续、delete删除",
+                enum_values=["get", "set", "pause", "resume", "delete"],
+            ),
+            ToolParameterInfo(
+                name="kind",
+                description="interval固定间隔，daily每天固定时刻；已有计划可省略沿用",
+                enum_values=["interval", "daily"],
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="interval_minutes",
+                description="interval间隔分钟，1～10080；例如每2小时填120",
+                param_type=ToolParamType.INTEGER,
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="local_time", description="daily每天HH:MM，例如21:00", required=False
+            ),
+            ToolParameterInfo(
+                name="timezone", description="IANA时区，例如Asia/Shanghai", required=False
+            ),
+            ToolParameterInfo(
+                name="intent",
+                description="以后醒来联系的简短话题/依据，最多240字；不是预写正文",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="at",
+                description="interval可选首次时刻，带偏移ISO，未来60秒～7天；省略从现在隔一轮开始",
+                required=False,
+            ),
+        ],
+        platforms=["qq"],
+        chat_scope="private",
+        trusted_context=CONTRACT,
+    )
+    async def private_repeat(
+        self,
+        action="get",
+        kind="",
+        interval_minutes=0,
+        local_time="",
+        timezone="",
+        intent="",
+        at="",
+        **kwargs,
+    ):
+        # Same trusted caller path; never accept a model-supplied target/session.
+        if action not in ("get", "set", "pause", "resume", "delete"):
+            return {"success": False, "message": "请选择get、set、pause、resume或delete"}
+        async with self._wake_lock:
+            probe = await self._repeat_identity(kwargs)
+            if not probe:
+                return {"success": False, "message": "当前没有可用的已授权私聊上下文"}
+            target, session = probe
+            try:
+                plan = self._change_wake_locked(
+                    "repeat_" + action,
+                    target,
+                    session,
+                    repeat_fields={
+                        "kind": kind,
+                        "interval_minutes": interval_minutes,
+                        "local_time": local_time,
+                        "timezone": timezone,
+                        "intent": intent,
+                        "at": at,
+                    },
+                )
+                current = plan["current"] if plan else None
+                return {
+                    "success": True,
+                    "message": {
+                        "get": "当前重复联系节奏",
+                        "set": "重复计划已保存",
+                        "pause": "重复计划已暂停",
+                        "resume": "重复计划从未来继续",
+                        "delete": "重复计划已删除，保留已有防重间隔",
+                    }[action],
+                    "repeat": plan,
+                    "next_at": current["at"]
+                    if plan and plan["enabled"] and action != "delete"
+                    else None,
+                }
+            except (ValueError, OSError) as exc:
+                from .webui import ERRORS
+
+                return {
+                    "success": False,
+                    "message": ERRORS.get(str(exc), "重复计划未保存，请检查时间、时区和意图"),
+                    "error": str(exc)
+                    if isinstance(exc, ValueError)
+                    else "wake_storage_unavailable",
+                }
+
+    async def _repeat_identity(self, kwargs):
+        host = kwargs.get("_host_context")
+        if (
+            not self._wake_ready
+            or not self._automatic_enabled()
+            or not isinstance(host, dict)
+            or host.get("contract") != CONTRACT
+            or host.get("platform") != "qq"
+            or host.get("group_id")
+        ):
+            return None
+        target, session = host.get("user_id"), host.get("session_id")
+        if (
+            not text(target, 128)
+            or not text(session, 128)
+            or host.get("stream_id") != session
+            or (host.get("account_id") and host["account_id"] != self._bot_qq)
+        ):
+            return None
+        resolved = await self._resolve_session_id(target, False)
+        state = ChatStreamState(session, target)
+        if (
+            not self._wake_ready
+            or not self._automatic_enabled()
+            or not self._is_authorized(state, target)
+            or resolved != session
+        ):
+            return None
+        return target, session
+
     def _change_wake_locked(
-        self, action, target, session, at="", zone="", intent="", *, revision=None, partial=False
+        self,
+        action,
+        target,
+        session,
+        at="",
+        zone="",
+        intent="",
+        *,
+        revision=None,
+        partial=False,
+        repeat_fields=None,
     ):
         """Both trusted model and authenticated admin use this lock-held mutation."""
         from .webui import wake_revision
@@ -267,13 +428,36 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         store = self._get_wakes()
         data = store.read()
         row = data["slots"].get(target)
-        if revision is not None and revision != wake_revision(target, session, row):
+        repeat = data.get("repeats", {}).get(target)
+        if revision is not None and revision != wake_revision(target, session, row, repeat):
             raise ValueError("stale_wake_revision")
+        if action.startswith("repeat_"):
+            from .repeat import set_plan, change_plan
+
+            if action in ("repeat_set", "repeat_resume") and not self._automatic_enabled():
+                raise ValueError("wake_disabled")
+            if repeat and repeat["session"] != session and action != "repeat_set":
+                raise ValueError("session_changed")
+            if action == "repeat_get":
+                return repeat
+            if action == "repeat_set":
+                plan = set_plan(data, target, session, time.time(), **(repeat_fields or {}))
+            else:
+                plan = change_plan(data, target, action, time.time())
+            store.write(data)
+            self._wake_event.set()
+            return plan
         if row and row["session"] != session and action != "set":
             raise ValueError("session_changed")
         if action == "set":
             if not self._automatic_enabled():
                 raise ValueError("wake_disabled")
+            if partial and row and row["status"] in PENDING and at and zone == row["timezone"]:
+                moment = datetime.fromisoformat(at)
+                if moment.utcoffset() is not None and int(moment.timestamp() // 60) == int(
+                    row["due"] // 60
+                ):
+                    at = ""  # Prefilled minute unchanged: edit purpose without moving a blocked occurrence.
             keep_time = (
                 partial
                 and row
@@ -308,14 +492,101 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     async def wake_cancel(self, target="", session="", revision=""):
         return await self.management_change("cancel", target, session, revision)
 
+    @API("wake_edit", description="认证管理页编辑单次/重复计划；无执行或重放操作", public=False)
+    async def wake_edit(
+        self,
+        action="",
+        target="",
+        session="",
+        revision="",
+        at="",
+        when="",
+        timezone="",
+        intent="",
+        kind="",
+        interval_minutes=0,
+        local_time="",
+    ):
+        from .webui import wall_instant, ERRORS
+
+        try:
+            if action not in (
+                "single_save",
+                "single_cancel",
+                "repeat_set",
+                "repeat_pause",
+                "repeat_resume",
+                "repeat_delete",
+            ):
+                raise ValueError("invalid_action")
+            if action == "single_save" and when:
+                if at:
+                    raise ValueError("invalid_management_request")
+                at = wall_instant(when, timezone)
+            if action.startswith("repeat_"):
+                result = await self.management_change(
+                    action,
+                    target,
+                    session,
+                    revision,
+                    repeat_fields={
+                        "at": at,
+                        "timezone": timezone,
+                        "intent": intent,
+                        "kind": kind,
+                        "interval_minutes": interval_minutes,
+                        "local_time": local_time,
+                    },
+                )
+            else:
+                result = await self.management_change(
+                    "set" if action == "single_save" else "cancel",
+                    target,
+                    session,
+                    revision,
+                    at,
+                    timezone,
+                    intent,
+                )
+            return result
+        except (ValueError, OSError) as exc:
+            return {
+                "success": False,
+                "message": ERRORS.get(
+                    str(exc), str(exc) if isinstance(exc, ValueError) else "预约存储不可用"
+                ),
+            }
+
     async def _run_wakes(self):
         async with self._wake_lock:
             if not self._wake_ready or not self._automatic_enabled():
                 return
             store = self._get_wakes()
             data = store.read()
+            from .repeat import advance, expires
+
+            jobs = [(target, row, None) for target, row in data["slots"].items()]
+            for target, plan in data.get("repeats", {}).items():
+                if not plan["enabled"]:
+                    continue
+                state = self._states.get((False, target))
+                if (
+                    not state
+                    or state.stream_id != plan["session"]
+                    or not self._is_authorized(state, target)
+                ):
+                    plan.update(enabled=False, state="revoked")
+                    plan["current"].update(
+                        status="revoked", block="authorization_or_session_changed"
+                    )
+                    store.write(data)
+                    continue
+                if time.time() >= expires(plan):
+                    advance(plan, time.time(), "expired", "repeat_window_missed")
+                    store.write(data)
+                jobs.append((target, plan["current"], plan))
             dispatched = False
-            for target, row in sorted(data["slots"].items(), key=lambda pair: pair[1]["due"]):
+            for target, row, plan in sorted(jobs, key=lambda item: item[1]["due"]):
                 now = time.time()
                 if row["status"] not in PENDING:
                     continue
@@ -326,9 +597,16 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     or not self._is_authorized(state, target)
                 ):
                     row.update(status="revoked", block="authorization_or_session_changed")
+                    if plan:
+                        plan.update(enabled=False, state="revoked")
                     store.write(data)
                     continue
                 if row["due"] > now or row["retry"] > now:
+                    continue
+                single = data["slots"].get(target)
+                if plan and single and single["status"] in PENDING:
+                    row.update(status="blocked", block="single_priority", retry=now + 60)
+                    store.write(data)
                     continue
                 if now - row["due"] >= 86400:
                     row.update(status="expired", block="blocked_24h")
@@ -343,11 +621,17 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     return
                 if not self._is_authorized(state, target) or resolved != row["session"]:
                     row.update(status="revoked", block="authorization_or_session_changed")
+                    if plan:
+                        plan.update(enabled=False, state="revoked")
                     store.write(data)
                     continue
                 # All rule reads occur after async Host lookups, using the latest
                 # config/time. A hot change must not open a stale admission window.
                 cfg, now = self.config.scheduler, time.time()
+                if plan and now >= expires(plan):
+                    advance(plan, now, "expired", "repeat_window_missed")
+                    store.write(data)
+                    continue
                 if now - row["due"] >= 86400:
                     row.update(status="expired", block="blocked_24h")
                     store.write(data)
@@ -360,7 +644,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 ):
                     block = "activity_hours"
                 elif now < max(
-                    self._guard_until(row),
+                    self._target_guard(data, target),
                     state.last_proactive_time + cfg.min_interval_between_chats * 60,
                 ):
                     block = "cooldown"
@@ -387,6 +671,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     shown=False,
                 )
                 data["last_dispatch"] = now
+                if plan:
+                    plan["attempted"] = now
+                    advance(plan, now)
                 store.write(data)
                 dispatched = True
                 self._record_submission(state, "unknown", "appointment", now)
@@ -419,7 +706,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     def _wake_delay(self):
         now = time.time()
-        rows = self._get_wakes().read()["slots"].values()
+        data = self._get_wakes().read()
+        rows = [
+            *data["slots"].values(),
+            *(plan["current"] for plan in data.get("repeats", {}).values() if plan["enabled"]),
+        ]
         return min(
             (max(1, max(r["due"], r["retry"]) - now) for r in rows if r["status"] in PENDING),
             default=86400,
@@ -495,10 +786,21 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     async def _check_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
         if not state.is_group:
             async with self._wake_lock:
-                row = self._get_wakes().read()["slots"].get(target_id)
-                if row and (row["status"] in PENDING or time.time() < self._guard_until(row)):
+                data = self._get_wakes().read()
+                row = data["slots"].get(target_id)
+                plan = data.get("repeats", {}).get(target_id)
+                if (
+                    (row and row["status"] in PENDING)
+                    or (plan and plan["enabled"])
+                    or time.time() < self._target_guard(data, target_id)
+                ):
                     self._note_check(
-                        state, "appointment" if row["status"] in PENDING else "cooldown"
+                        state,
+                        "appointment"
+                        if row and row["status"] in PENDING
+                        else "repeat"
+                        if plan and plan["enabled"]
+                        else "cooldown",
                     )
                     return
                 await self._check_default_and_trigger(state, target_id)
@@ -695,7 +997,20 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     if not record or not record["wake"]:
                         continue
                     scope = record["scope"] or kwargs.get("session_id", "")
-                    for target, row in data["slots"].items():
+                    records = [
+                        *data["slots"].items(),
+                        *(
+                            (target, row["repeat_last"])
+                            for target, row in data["slots"].items()
+                            if row.get("repeat_last")
+                        ),
+                        *(
+                            (target, plan["last"])
+                            for target, plan in data.get("repeats", {}).items()
+                            if plan["last"]
+                        ),
+                    ]
+                    for target, row in records:
                         state = self._states.get((False, target))
                         if (
                             scope not in scopes

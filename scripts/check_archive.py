@@ -18,8 +18,10 @@ FILES = (
     "bilibili_bridge.py",
     "prompt_visibility.py",
     "wake_store.py",
+    "repeat.py",
     "webui.py",
     "webui.json",
+    "webui.html",
     "README.md",
     "LICENSE",
     "NOTICE.md",
@@ -56,11 +58,16 @@ def main():
             "lonelymai_latest_replyer_task",
             "lonelymai_life_receipt",
             "neko_proactive_wake",
+            "neko_proactive_repeat",
+            "wake_edit",
             "wake_overview",
             "wake_save",
             "wake_cancel",
         } <= names
         assert not (extracted / "config.toml").exists()
+        declaration = json.loads((extracted / "webui.json").read_text(encoding="utf-8"))
+        assert declaration["pages"][0]["entry"] == "webui.html"
+        assert (extracted / "webui.html").is_file()
         print("Source archive extracted; SDK discovers plugin factory/config without local config")
 
 

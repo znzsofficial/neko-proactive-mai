@@ -76,7 +76,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
             "pages"
         ][0]
         self.assertEqual(set(page["actions"]), {"save", "cancel"})
-        self.assertEqual(page["poll_interval_seconds"], 0)
+        self.assertEqual(page["mode"], "custom")
         self.assertIn("confirmation", page["actions"]["cancel"])
         self.assertEqual(set(page["queries"]), {"overview"})
 

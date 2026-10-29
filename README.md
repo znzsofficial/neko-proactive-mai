@@ -2,6 +2,42 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+## 2.6.0 · 单次与重复联系节奏
+
+新增当前授权私聊的固定间隔/每日重复计划，沿用唯一调度器。管理页改为宿主支持的隔离custom扩展：真实聊天导航、单次与重复分区、日期时间/时区表单、按目标和真实会话隔离的草稿、预填/放弃草稿、中文操作结果与CAS冲突恢复。没有立即唤醒、试发、未知重放或另一套全局配置保存器。
+
+**发布前提：**标准维护发布器必须将本插件`webui.html`作为安全HTML资产纳入精确SHA/哈希验证与上传白名单。旧发布器只上传py/md/json，漏HTML会导致宿主注册失败；不得手工SFTP、运行时生成HTML或把缺文件的包上线。本仓源码包烟测已包含并检查HTML，父仓发布工具的相应变更由父会话另行处理。宿主支持custom协议2即可，不修改宿主、不新增服务端口/CDN/页面独立认证。
+
+### 模型工具（实际主描述可见）
+
+- `neko_proactive_wake(action="get"|"set"|"cancel", at?, timezone?, intent?)`兼容原单次语义。想稍后续一个具体话题时约一次醒来判断；`at`是带UTC偏移ISO8601，未来60秒～7天；`timezone`为匹配IANA时区，`intent`为1～240字依据。set替换旧单次，get返回实际下一时刻和中文结果。
+- `neko_proactive_repeat(action="get"|"set"|"pause"|"resume"|"delete", kind?, interval_minutes?, local_time?, timezone?, intent?, at?)`管理当前私聊唯一重复计划。`kind="interval",interval_minutes=120`表示每2小时；`kind="daily",local_time="21:00",timezone="Asia/Shanghai"`表示当地每天21点；首次set须带短意图/依据。interval为1～10080整数分钟，可选`at`指定首次绝对时刻，省略则从现在隔一轮开始。修改已有计划可省略沿用字段，保持同样时刻/间隔时只改意图不漂移；修改暂停计划不自动恢复，resume才继续。
+- 两个工具没有目标参数，只消费Host可信当前私聊上下文、当前名单及新鲜session。主说明写在SDK实际采用的`brief_description`/`description`链，不只放宿主不读取的detailed字段；deferred/tool_search与已发现工具Schema使用同一可见描述。内容仅说明“稍后具体话题用单次、持续联系用重复、可沉默、不必每次设、不保证提醒”，不加常驻system prompt、不改Planner/Replyer模板、宿主人设、群私意图。
+
+### 调度与每轮持久边界
+
+优先级是 **pending单次 > 已启用重复 > 原基础周期**；单次等待时重复不抢跑，重复启用时同私聊默认周期不再叫醒。暂停/删除重复后若没有单次接管，则恢复原基础检查；群聊旧周期、无新计划私聊、原数值配置/名单/默认意图保持。
+
+interval保留稳定绝对锚点，按锚点加间隔寻找下一计划时刻，不按页面刷新/上次模型耗时重新计时。daily按IANA时区的每天HH:MM计算：DST不存在时刻跳过当天，重叠取较早一次，当天不跑第二次。页面显示下一绝对时刻及计划时区；单次表单输入当地日期时间＋IANA时区，重叠同样取较早，缺失时刻返回中文错误。
+
+每个重复计划只保留未来当前轮、最近尝试结果/任务关联及最近跳过原因，不积压历史。到点受原活动时段/最小间隔/真人静默、当前授权、全局预约≥60秒间距；阻挡每分钟规则检查，不调用模型，最多等到下一标称轮或24小时（先到为准）后跳过到严格未来。单次接管期间错过的重复不补播。重启错过当前轮也跳到未来；未来轮跨重启保留。暂停/继续、删除、改期不清attempt guard。
+
+每轮**Host I/O前**将该occurrence持久unknown/attempt，并将下一轮推进到未来；明确接收/拒绝/未知都不重放本轮。unknown在崩溃/取消/最终写失败时保留；下一轮仍受原最小间隔而不是立即重试。接收仅Host入队，不证明QQ送达。具体意图只通过原任务ID/真实session匹配的临时Planner Item展示一次，后续请求/Replyer/摘要仍清理。删除计划保留必要的最近不明归因与防重时间，不召回已接受任务。
+
+### 存储与回滚
+
+旧`private-wakes.json` v1单次可原样读取，不因页面读操作迁移。首次保存重复时原子写v2，保留原slots/unknown/last_dispatch，再增加有界repeats；仍最多128目标、256KiB、0600/fsync/原子替换，损坏/未知格式保原拒绝。未写重复仍保持v1，无新数据库/worker/全局发送账本；普通周期冷却仍内存。
+
+**v2不能直接退回≤2.5.1。旧版会拒绝版本2并加载失败，而不会悄悄忽略重复计划恢复默认私聊周期。** 回滚须先保全v2/unknown/配置，明确退役重复计划并另行审核离线兼容转换与防重时间；不能只把version改1或用旧快照覆盖。即使已删除全部重复，文件仍v2，避免隐式降级。需要即时回滚时保留现场、选择匹配版本/维护窗口，由管理员决定，不自动清状态。未做存储降级/生产回滚演练。
+
+### 管理页
+
+入口仍`/extensions/neko.proactive/manage`。页面只通过Host注入的`maibot.query/action`及声明绑定通信：Host登录cookie/owner/静态private API、确认、CAS、参数白名单和并发预算继续生效；页面sandbox禁止网络/同源/表单提交/worker，HTML只含内联样式/脚本，没有token/私钥或直接HTTP路径。所有聊天名称/短意图用textContent，不执行HTML。
+
+`wake_overview/wake_save/wake_cancel`旧private API保留；新增private `wake_edit`供页面单次/重复操作，中文业务错误明确返回`success=false`给页面显示，不冒充操作成功。target/session只能从当前Host名单交集选择，模型工具不借管理员权限。停用时仍可查看、取消/暂停/删除，拒绝新增/恢复；撤权和session改变不露旧私聊意图。
+
+页面每15秒低频只读刷新，编辑中暂停；手动刷新保草稿，按目标＋真实session隔离，变更后仍携带旧CAS拒绝覆盖，可“放弃草稿，载入最新”。异步请求busy/generation阻止晚到覆盖和重复操作，确认由Host桥提供。真实deadline只来自唯一循环，浏览器只格式化，不推算下一执行；基础规则仍从原插件配置页设置。静默仅显示原调度器观测，不为页面查询私聊历史。
+
 2.5.1：修复管理页解析真实SDK会话结果的层级错误。PluginContext已将Host的`{success,stream}`规范化为直接会话字典，管理页不再重复取stream而把目标全部判为未就绪；同时兼容显式stream信封并拒绝失败/未找到结果。平台、账号、群私类型、名单和session复查保留，缺失或不匹配的账号拒绝。新增真实PluginContext＋底层原始Host RPC信封回归，覆盖2群/1私读取与预约管理。2.5.0的Host网关隔离测试没有覆盖chat SDK规范化边界，不能当作该边界已验证。
 
 2.5.0：新增原生WebUI「主动唤醒管理」页（`/extensions/neko.proactive/manage`），同页查看基础检查、规则阻挡、私聊预约与最近提交结果，支持管理员新建、改期/替换、修改意图和确认取消。复用原调度器、WakeStore和模型工具的同一锁内业务，不增加试发或重放入口；管理API明确`public=False`，仅走宿主登录认证的插件扩展网关，不对其他插件`api.call`开放。原私聊意图/Planner模板、群聊周期和所有数值配置保持。
@@ -61,7 +97,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.5.1"
+version = "2.6.0"
 
 [scheduler]
 enabled = true

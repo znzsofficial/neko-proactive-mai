@@ -31,8 +31,16 @@ REASONS = {
     "checking": "正在检查",
     "eligible": "本轮条件通过",
     "appointment": "由预约接管",
+    "single_priority": "等待单次预约结束",
+    "repeat_window_missed": "本次已跳过，等待下一轮",
+    "repeat_deleted": "重复计划已删除",
 }
 ERRORS = {
+    "invalid_repeat": "选择固定间隔或每天，并填写联系依据",
+    "invalid_repeat_interval": "间隔须为1～10080分钟",
+    "invalid_repeat_clock": "每天时刻须为HH:MM，不能同时填写间隔或首次时刻",
+    "repeat_not_found": "当前没有重复计划",
+    "daily_time_unavailable": "未来当地时刻不可用",
     "wake_disabled": "插件或自动调度已关闭，未保存新预约；仍可取消待执行预约",
     "private_chat_not_authorized": "目标不在当前私聊授权名单中",
     "session_changed": "真实会话已改变，请刷新后重新选择",
@@ -47,8 +55,31 @@ ERRORS = {
 }
 
 
-def wake_revision(target, session, row):
-    raw = json.dumps([target, session, row], ensure_ascii=False, sort_keys=True, allow_nan=False)
+def wall_instant(when, zone):
+    from .repeat import zone_info
+
+    if not text(when, 32):
+        raise ValueError("日期和时间无效")
+    naive = datetime.fromisoformat(when)
+    if naive.tzinfo is not None:
+        raise ValueError("请选择不带偏移的当地日期和时间")
+    tz = zone_info(zone)
+    candidates = [
+        naive.replace(tzinfo=tz, fold=fold).timestamp()
+        for fold in (0, 1)
+        if datetime.fromtimestamp(naive.replace(tzinfo=tz, fold=fold).timestamp(), tz).replace(
+            tzinfo=None
+        )
+        == naive
+    ]
+    if not candidates:
+        raise ValueError("该当地时刻因夏令时不存在，请选择其他时间")
+    return datetime.fromtimestamp(min(candidates), tz).isoformat()
+
+
+def wake_revision(target, session, row, repeat=None):
+    value = [target, session, row] if repeat is None else [target, session, row, repeat]
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -130,7 +161,9 @@ class WakeManagement:
         )
         return {"session": sid, "name": name[:80] if text(name, 500) else "未命名聊天"}
 
-    async def management_change(self, action, target, session, revision, at="", zone="", intent=""):
+    async def management_change(
+        self, action, target, session, revision, at="", zone="", intent="", *, repeat_fields=None
+    ):
         try:
             if (
                 not text(target, 128)
@@ -150,9 +183,22 @@ class WakeManagement:
                     if not resolved or resolved["session"] != session:
                         raise ValueError("session_changed")
                     row = self._change_wake_locked(
-                        action, target, session, at, zone, intent, revision=revision, partial=True
+                        action,
+                        target,
+                        session,
+                        at,
+                        zone,
+                        intent,
+                        revision=revision,
+                        partial=True,
+                        repeat_fields=repeat_fields,
                     )
-                    label = (
+                    label = {
+                        "repeat_set": "重复计划已保存",
+                        "repeat_pause": "重复计划已暂停",
+                        "repeat_resume": "重复计划从未来继续",
+                        "repeat_delete": "重复计划已删除",
+                    }.get(action) or (
                         "已保存预约"
                         if action == "set"
                         else "已取消待执行预约"
@@ -206,6 +252,7 @@ class WakeManagement:
                     if state and (not stream or state.stream_id != stream["session"]):
                         state = None
                     row = None if group else data["slots"].get(target)
+                    plan = None if group else data.get("repeats", {}).get(target)
                     if not group and stream:
                         current_private.add(target)
                     observation = self._observations.get((group, target), {})
@@ -214,7 +261,7 @@ class WakeManagement:
                     cooldown = max(
                         (state.last_proactive_time if state else 0)
                         + cfg.min_interval_between_chats * 60,
-                        self._guard_until(row) if row else 0,
+                        self._target_guard(data, target) if not group else 0,
                     )
                     last_message = observation.get("last_message")
                     isolation = (
@@ -226,6 +273,8 @@ class WakeManagement:
                     reason = (
                         "由预约接管"
                         if pending
+                        else "由重复计划接管"
+                        if plan and plan["enabled"]
                         else "插件或调度已关闭"
                         if not enabled
                         else "真实会话未就绪"
@@ -260,6 +309,30 @@ class WakeManagement:
                             row.get("last_outcome", old_outcome), "此前预约尝试，旧版未保留结果"
                         )
                         last_text = local_time(row["attempted"]) + " · " + outcome
+                    if (
+                        plan
+                        and plan["last"]
+                        and plan["last"]["attempted"]
+                        and (not last or plan["last"]["attempted"] >= last["at"])
+                        and (not row or plan["last"]["attempted"] >= row["attempted"])
+                    ):
+                        previous = plan["last"]
+                        last_text = (
+                            local_time(previous["attempted"]) + " · " + STATUSES[previous["status"]]
+                        )
+                    retired = row.get("repeat_last") if row else None
+                    if (
+                        retired
+                        and (not last or retired["attempted"] >= last["at"])
+                        and (
+                            not plan
+                            or not plan["last"]
+                            or retired["attempted"] >= plan["last"]["attempted"]
+                        )
+                    ):
+                        last_text = (
+                            local_time(retired["attempted"]) + " · " + STATUSES[retired["status"]]
+                        )
                     base.append(
                         {
                             "chat": (stream["name"] if stream else "会话未就绪")
@@ -270,6 +343,8 @@ class WakeManagement:
                             "state": reason,
                             "next": "由预约接管"
                             if pending
+                            else "由重复计划接管"
+                            if plan and plan["enabled"]
                             else local_time(self._next_regular_at)
                             if enabled and stream and self._next_regular_at
                             else "正在检查"
@@ -295,6 +370,7 @@ class WakeManagement:
                     if group or not stream:
                         continue
                     active_row = row if row and row["session"] == stream["session"] else None
+                    active_plan = plan if plan and plan["session"] == stream["session"] else None
                     earliest = (
                         next_activity(
                             max(
@@ -317,7 +393,7 @@ class WakeManagement:
                             "chat": stream["name"] + " · " + target,
                             "target": target,
                             "session": stream["session"],
-                            "revision": wake_revision(target, stream["session"], row),
+                            "revision": wake_revision(target, stream["session"], row, plan),
                             "at": active_row["at"] if active_row else "—",
                             "zone": active_row["timezone"] if active_row else "—",
                             "intent": active_row["intent"] if active_row else "—",
@@ -343,6 +419,40 @@ class WakeManagement:
                             "cannot_cancel": not self._wake_ready
                             or not active_row
                             or active_row["status"] not in PENDING,
+                            "single": {
+                                key: active_row[key]
+                                for key in (
+                                    "id",
+                                    "at",
+                                    "timezone",
+                                    "intent",
+                                    "status",
+                                    "block",
+                                    "due",
+                                    "retry",
+                                )
+                            }
+                            if active_row
+                            else None,
+                            "repeat": {
+                                "kind": active_plan["kind"],
+                                "timezone": active_plan["timezone"],
+                                "intent": active_plan["intent"],
+                                "interval_minutes": active_plan["interval"] // 60,
+                                "local_time": active_plan["clock"],
+                                "enabled": active_plan["enabled"],
+                                "state": active_plan["state"],
+                                "next_at": active_plan["current"]["at"],
+                                "next_due": active_plan["current"]["due"],
+                                "status": STATUSES[active_plan["current"]["status"]],
+                                "reason": REASONS.get(active_plan["current"]["block"], "—"),
+                                "retry": active_plan["current"]["retry"],
+                                "last_skip": REASONS.get(
+                                    active_plan.get("last_skip", {}).get("reason", ""), "—"
+                                ),
+                            }
+                            if active_plan
+                            else None,
                         }
                     )
                 hidden = [
@@ -356,6 +466,15 @@ class WakeManagement:
                     for target, row in data["slots"].items()
                     if target not in current_private
                 ]
+                hidden.extend(
+                    {
+                        "chat": "已撤权或失效重复目标 · " + target,
+                        "status": "已停止调度",
+                        "reason": "不展示旧意图；保留原记录",
+                    }
+                    for target in data.get("repeats", {})
+                    if target not in current_private and target not in data["slots"]
+                )
                 return {
                     "base": base,
                     "reservations": reservations,
@@ -376,6 +495,7 @@ class WakeManagement:
                     if truncated
                     else f"{len(base)}个基础目标 · {len(reservations)}个可查看私聊",
                     "operation": self._management_operation,
+                    "checked_at": now,
                     "rules": cfg.start_time
                     + "–"
                     + cfg.end_time
