@@ -98,7 +98,7 @@ class WakeStore:
         if (
             not isinstance(data, dict)
             or type(data.get("version")) is not int
-            or data.get("version") not in (1, 2)
+            or data.get("version") not in (1, 2, 3)
             or not number(data.get("last_dispatch"))
             or not isinstance(data.get("slots"), dict)
             or len(data["slots"]) > MAX_TARGETS
@@ -111,7 +111,7 @@ class WakeStore:
                 raise ValueError("invalid_wake_record")
         if data["version"] == 1 and "repeats" in data:
             raise ValueError("invalid_wake_index")
-        if data["version"] == 2:
+        if data["version"] in (2, 3):
             from .repeat import valid_plan
 
             repeats = data.get("repeats")
@@ -125,6 +125,21 @@ class WakeStore:
                 not text(target, 128) or not valid_plan(plan) for target, plan in repeats.items()
             ):
                 raise ValueError("invalid_repeat_record")
+        if data["version"] != 3 and "dayplans" in data:
+            raise ValueError("invalid_day_index")
+        if data["version"] == 3:
+            from .dayplan import validate_day
+
+            plans = data.get("dayplans")
+            if (
+                not isinstance(plans, dict)
+                or len(set(data["slots"]) | set(data["repeats"]) | set(plans)) > MAX_TARGETS
+            ):
+                raise ValueError("invalid_day_index")
+            if any(
+                not text(target, 128) or not validate_day(plan) for target, plan in plans.items()
+            ):
+                raise ValueError("invalid_day_record")
         return data
 
     def write(self, data):
@@ -132,7 +147,10 @@ class WakeStore:
         raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if (
             len(raw) > MAX_BYTES
-            or len(set(data["slots"]) | set(data.get("repeats", {}))) > MAX_TARGETS
+            or len(
+                set(data["slots"]) | set(data.get("repeats", {})) | set(data.get("dayplans", {}))
+            )
+            > MAX_TARGETS
         ):
             raise ValueError("wake_index_full")
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -167,6 +185,11 @@ class WakeStore:
             if plan["enabled"] and plan["current"]["due"] <= now:
                 advance(plan, now, "expired", "restart_missed")
                 changed = True
+        if data.get("dayplans"):
+            from .dayplan import rotate
+
+            for plan in data["dayplans"].values():
+                changed = rotate(plan, now, restart=True) or changed
         if changed:
             self.write(data)
 

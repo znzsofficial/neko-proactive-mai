@@ -11,6 +11,7 @@ import asyncio
 import random
 import time
 import json
+import uuid
 from datetime import datetime, time as datetime_time
 from typing import Dict, Optional, Tuple
 
@@ -74,6 +75,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         self._management_operation = "尚无管理操作"
         self._management_epoch = 0
         self._wake_inflight = None
+        self._day_hints = {}
 
     # ========== 生命周期 ==========
 
@@ -199,7 +201,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         return max(row["attempted"], row.get("guard", 0)) + 60
 
     def _target_guard(self, data, target):
-        rows = [data["slots"].get(target), data.get("repeats", {}).get(target)]
+        rows = [
+            data["slots"].get(target),
+            data.get("repeats", {}).get(target),
+            data.get("dayplans", {}).get(target),
+        ]
         return max((self._guard_until(row) for row in rows if row), default=0)
 
     @Tool(
@@ -404,6 +410,101 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             return None
         return target, session
 
+    @Tool(
+        "neko_proactive_dayplan",
+        brief_description="查看或安排当前私聊今天少量想做/关注的事：get查看，add添加，update修改，cancel删除未来事项。可整理想法、续已知兴趣或话题，不必都是联系对方；留空正常，不把计划当真实经历。at填今天未来带偏移ISO时刻，timezone填IANA时区，intent写依据；建议2～4项、硬上限6项。修改/删除填get返回的item_id/version，只改未到点且未尝试事项，不覆盖单次/重复；到点醒来判断，可沉默。",
+        parameters=[
+            ToolParameterInfo(
+                name="action",
+                description="get查看、add添加、update修改、cancel删除未来事项",
+                enum_values=["get", "add", "update", "cancel"],
+            ),
+            ToolParameterInfo(
+                name="at", description="今天未来60秒后的带UTC偏移ISO8601时刻", required=False
+            ),
+            ToolParameterInfo(
+                name="timezone",
+                description="首次添加选择IANA时区，如Asia/Shanghai；固定后沿用，不靠换时区重置当天额度",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="intent",
+                description="这项想关注/整理的事及已知依据，1～240字；计划不代表现实已做过",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="item_id",
+                description="get返回的不透明事项ID，update/cancel必填",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="version",
+                description="该item_id当前版本，update/cancel必填；变化后重新get",
+                required=False,
+            ),
+        ],
+        platforms=["qq"],
+        chat_scope="private",
+        trusted_context=CONTRACT,
+    )
+    async def private_dayplan(
+        self, action="get", at="", timezone="", intent="", item_id="", version="", **kwargs
+    ):
+        from .dayplan import get_day
+        from .webui import ERRORS
+
+        try:
+            async with self._wake_lock:
+                epoch = self._management_epoch
+                identity = await self._repeat_identity(kwargs)
+                if not identity:
+                    raise ValueError("private_chat_not_authorized")
+                target, session = identity
+                actual = await self._management_stream(target, False)
+                state = ChatStreamState(session, target)
+                if (
+                    not actual
+                    or actual["session"] != session
+                    or epoch != self._management_epoch
+                    or not self._wake_ready
+                    or not self._automatic_enabled()
+                    or not self._is_authorized(state, target)
+                ):
+                    raise ValueError("private_chat_not_authorized")
+                if action == "get":
+                    result = get_day(
+                        self._get_wakes().read(), target, session, time.time(), timezone
+                    )
+                elif action in ("add", "update", "cancel"):
+                    self._change_wake_locked(
+                        "day_" + action,
+                        target,
+                        session,
+                        day_fields={
+                            "at": at,
+                            "timezone": timezone,
+                            "intent": intent,
+                            "item_id": item_id,
+                            "version": version,
+                        },
+                    )
+                    result = get_day(self._get_wakes().read(), target, session, time.time())
+                else:
+                    raise ValueError("invalid_action")
+                return {
+                    "success": True,
+                    "message": "当天事项已更新；只是计划，到点再判断"
+                    if action != "get"
+                    else "今天日程，留空也正常",
+                    "dayplan": result,
+                }
+        except (ValueError, OSError) as exc:
+            return {
+                "success": False,
+                "message": ERRORS.get(str(exc), "当天事项未完成，请核对今天时刻、时区、依据和版本"),
+                "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
+            }
+
     def _change_wake_locked(
         self,
         action,
@@ -416,13 +517,14 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         revision=None,
         partial=False,
         repeat_fields=None,
+        day_fields=None,
     ):
         """Both trusted model and authenticated admin use this lock-held mutation."""
         from .webui import wake_revision
 
         if not self._wake_ready:
             raise ValueError("wake_disabled")
-        if self._wake_inflight == target and action not in ("get", "repeat_get"):
+        if self._wake_inflight == target and action not in ("get", "repeat_get", "day_get"):
             raise ValueError("wake_submission_inflight")
         if target not in {str(value).strip() for value in self.config.target.allowed_friends}:
             raise ValueError("private_chat_not_authorized")
@@ -430,8 +532,26 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         data = store.read()
         row = data["slots"].get(target)
         repeat = data.get("repeats", {}).get(target)
-        if revision is not None and revision != wake_revision(target, session, row, repeat):
+        day = data.get("dayplans", {}).get(target)
+        if revision is not None and revision != wake_revision(target, session, row, repeat, day):
             raise ValueError("stale_wake_revision")
+        if action.startswith("day_"):
+            from .dayplan import change_day
+
+            if action != "day_cancel" and not self._automatic_enabled():
+                raise ValueError("wake_disabled")
+            result = change_day(
+                data,
+                target,
+                session,
+                time.time(),
+                action,
+                preserve_minute=partial,
+                **(day_fields or {}),
+            )
+            store.write(data)
+            self._wake_event.set()
+            return result
         if action.startswith("repeat_"):
             from .repeat import set_plan, change_plan
 
@@ -507,6 +627,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         kind="",
         interval_minutes=0,
         local_time="",
+        item_id="",
+        version="",
     ):
         from .webui import wall_instant, ERRORS
 
@@ -518,13 +640,30 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 "repeat_pause",
                 "repeat_resume",
                 "repeat_delete",
+                "day_add",
+                "day_update",
+                "day_cancel",
             ):
                 raise ValueError("invalid_action")
-            if action == "single_save" and when:
+            if action in ("single_save", "day_add", "day_update") and when:
                 if at:
                     raise ValueError("invalid_management_request")
                 at = wall_instant(when, timezone)
-            if action.startswith("repeat_"):
+            if action.startswith("day_"):
+                result = await self.management_change(
+                    action,
+                    target,
+                    session,
+                    revision,
+                    day_fields={
+                        "at": at,
+                        "timezone": timezone,
+                        "intent": intent,
+                        "item_id": item_id,
+                        "version": version,
+                    },
+                )
+            elif action.startswith("repeat_"):
                 result = await self.management_change(
                     action,
                     target,
@@ -565,8 +704,18 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             store = self._get_wakes()
             data = store.read()
             from .repeat import advance, expires
+            from .dayplan import rotate, active_items
 
-            jobs = [(target, row, None) for target, row in data["slots"].items()]
+            jobs = [(target, row, None, False) for target, row in data["slots"].items()]
+            for target, dayplan in data.get("dayplans", {}).items():
+                changed = rotate(dayplan, time.time())
+                if changed:
+                    store.write(data)
+                jobs.extend(
+                    (target, row, None, True)
+                    for row in dayplan["items"].values()
+                    if row["status"] in PENDING
+                )
             for target, plan in data.get("repeats", {}).items():
                 if not plan["enabled"]:
                     continue
@@ -585,9 +734,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 if time.time() >= expires(plan):
                     advance(plan, time.time(), "expired", "repeat_window_missed")
                     store.write(data)
-                jobs.append((target, plan["current"], plan))
+                jobs.append((target, plan["current"], plan, False))
             dispatched = False
-            for target, row, plan in sorted(jobs, key=lambda item: item[1]["due"]):
+            for target, row, plan, is_day in sorted(
+                jobs, key=lambda item: (item[1]["due"], not item[3])
+            ):
                 now = time.time()
                 if row["status"] not in PENDING:
                     continue
@@ -605,8 +756,30 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 if row["due"] > now or row["retry"] > now:
                     continue
                 single = data["slots"].get(target)
-                if plan and single and single["status"] in PENDING:
+                if (plan or is_day) and single and single["status"] in PENDING:
                     row.update(status="blocked", block="single_priority", retry=now + 60)
+                    store.write(data)
+                    continue
+                if is_day:
+                    nearby = [
+                        r
+                        for r in active_items(data, target)
+                        if r["status"] in PENDING
+                        and r["session"] == state.stream_id
+                        and r["due"] <= row["due"] + 60
+                    ]
+                    merge_at = max((r["due"] for r in nearby), default=row["due"])
+                    if merge_at > now:
+                        row.update(status="blocked", block="day_merge_wait", retry=merge_at)
+                        store.write(data)
+                        continue
+                if plan and any(
+                    r["status"] in PENDING
+                    and r["session"] == state.stream_id
+                    and r["due"] <= now + 60
+                    for r in active_items(data, target)
+                ):
+                    advance(plan, now, "expired", "dayplan_priority")
                     store.write(data)
                     continue
                 if now - row["due"] >= 86400:
@@ -615,7 +788,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     continue
                 self._note_check(state, "appointment")
                 # Query session fresh; config/lifecycle may change during Host reads.
-                resolved = await self._resolve_session_id(target, False)
+                if is_day:
+                    resolved_stream = await self._management_stream(target, False)
+                    resolved = resolved_stream["session"] if resolved_stream else None
+                else:
+                    resolved = await self._resolve_session_id(target, False)
                 if not self._wake_ready or not self._automatic_enabled():
                     return
                 if not self._is_authorized(state, target) or resolved != row["session"]:
@@ -627,6 +804,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 # All rule reads occur after async Host lookups, using the latest
                 # config/time. A hot change must not open a stale admission window.
                 now = time.time()
+                if is_day and rotate(data["dayplans"][target], now):
+                    store.write(data)
+                    continue
                 if plan and now >= expires(plan):
                     advance(plan, now, "expired", "repeat_window_missed")
                     store.write(data)
@@ -655,6 +835,28 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     task="",
                     shown=False,
                 )
+                merged = [row]
+                if is_day:
+                    merged = [
+                        r
+                        for r in active_items(data, target)
+                        if r["status"] in PENDING
+                        and r["due"] <= now
+                        and r["session"] == state.stream_id
+                    ]
+                    if row not in merged:
+                        merged.append(row)
+                    for member in merged:
+                        member.update(
+                            status="unknown",
+                            last_outcome="unknown",
+                            attempted=now,
+                            block="",
+                            task="",
+                            shown=False,
+                            batch_id=row["id"],
+                        )
+                    data["dayplans"][target]["attempted"] = now
                 data["last_dispatch"] = now
                 if plan:
                     plan["attempted"] = now
@@ -693,29 +895,49 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 row = self._find_wake(data, target, wake_id)
                 if row is None:
                     return
-                if isinstance(result, dict) and result.get("success") is True:
-                    row["status"] = "submitted"
-                    row["last_outcome"] = "submitted"
-                    task = result.get("task_id")
-                    if text(task, 160) and task.startswith("proactive:neko.proactive:"):
-                        if not row["task"]:
-                            row["task"] = task
-                elif isinstance(result, dict) and result.get("success") is False:
-                    row["status"] = "rejected"
-                    row["last_outcome"] = "rejected"
+                batch = (
+                    [r for r in self._wake_records(data, target) if r.get("batch_id") == wake_id]
+                    if is_day
+                    else [row]
+                )
+                for member in batch:
+                    if isinstance(result, dict) and result.get("success") is True:
+                        member["status"] = "submitted"
+                        member["last_outcome"] = "submitted"
+                        task = result.get("task_id")
+                        if (
+                            text(task, 160)
+                            and task.startswith("proactive:neko.proactive:")
+                            and not member["task"]
+                        ):
+                            member["task"] = task
+                    elif isinstance(result, dict) and result.get("success") is False:
+                        member["status"] = "rejected"
+                        member["last_outcome"] = "rejected"
                 store.write(data)
                 self._record_submission(state, row["status"], "appointment", now)
                 return  # One admitted Host dispatch per pass; reread next pass.
 
     @staticmethod
-    def _find_wake(data, target, wake_id):
+    def _wake_records(data, target):
         slot = data["slots"].get(target)
         plan = data.get("repeats", {}).get(target)
-        for row in (
-            slot,
-            slot.get("repeat_last") if slot else None,
-            plan.get("last") if plan else None,
-        ):
+        day = data.get("dayplans", {}).get(target)
+        return [
+            row
+            for row in (
+                slot,
+                slot.get("repeat_last") if slot else None,
+                plan.get("last") if plan else None,
+                *(day["items"].values() if day else []),
+                *(day["retained"] if day else []),
+            )
+            if row
+        ]
+
+    @staticmethod
+    def _find_wake(data, target, wake_id):
+        for row in LonelyMaiPlugin._wake_records(data, target):
             if row and row["id"] == wake_id:
                 return row
         return None
@@ -726,6 +948,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         rows = [
             *data["slots"].values(),
             *(plan["current"] for plan in data.get("repeats", {}).values() if plan["enabled"]),
+            *(row for day in data.get("dayplans", {}).values() for row in day["items"].values()),
         ]
         return min(
             (max(1, max(r["due"], r["retry"]) - now) for r in rows if r["status"] in PENDING),
@@ -805,9 +1028,18 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 data = self._get_wakes().read()
                 row = data["slots"].get(target_id)
                 plan = data.get("repeats", {}).get(target_id)
+                from .dayplan import active_items
+
+                day_due = any(
+                    row["status"] in PENDING
+                    and row["session"] == state.stream_id
+                    and row["due"] <= time.time() + 60
+                    for row in active_items(data, target_id)
+                )
                 if (
                     (row and row["status"] in PENDING)
                     or (plan and plan["enabled"])
+                    or day_due
                     or time.time() < self._target_guard(data, target_id)
                 ):
                     self._note_check(
@@ -991,9 +1223,110 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         wake_items = await self._wake_prompt(kwargs)
         if wake_items:
             modified["items"] = [*modified.get("items", []), *wake_items]
-        if removed or offers or bili_offers or wake_items:
+        day_hint = await self._day_hint(kwargs) if not wake_items else []
+        if day_hint:
+            modified["items"] = [*modified.get("items", []), *day_hint]
+        if removed or offers or bili_offers or wake_items or day_hint:
             return {"action": "continue", "modified_kwargs": modified}
         return None
+
+    async def _day_hint(self, kwargs):
+        from .dayplan import day_key
+        from .prompt_visibility import EPHEMERAL, task_record
+        from datetime import timezone
+
+        session = kwargs.get("session_id")
+        if (
+            not self._wake_ready
+            or not self._automatic_enabled()
+            or self._wake_lock.locked()
+            or not text(session, 128)
+        ):
+            return []
+        state = next(
+            (s for s in self._states.values() if not s.is_group and s.stream_id == session), None
+        )
+        if not state or not self._is_authorized(state, state.target_id):
+            return []
+        seen = self._day_hints.get(state.target_id)
+        if seen and (
+            seen["session"] != session
+            or time.time() - seen["at"] < 20 * 3600
+            or day_key(time.time(), seen["timezone"]) <= seen["date"]
+        ):
+            return []
+        items = kwargs.get("items")
+        if not isinstance(items, list):
+            return []
+        if not any(
+            isinstance(item, dict) and item.get("item_type") == "UserMessageItem" for item in items
+        ):
+            return []
+        for item in items:
+            parts = item.get("parts") if isinstance(item, dict) else None
+            if isinstance(parts, list) and any(
+                isinstance(part, dict)
+                and isinstance(part.get("text"), str)
+                and part["text"].lstrip().startswith("<plugin_proactive_task ")
+                for part in parts
+            ):
+                return []
+        if any(
+            (record := task_record(item)) and 0 <= time.time() - record["stamp"] / 1000 < 180
+            for item in items
+        ):
+            return []
+        try:
+            async with self._wake_lock:
+                epoch = self._management_epoch
+                resolved = await self._management_stream(state.target_id, False)
+                if (
+                    not resolved
+                    or resolved["session"] != session
+                    or epoch != self._management_epoch
+                    or not self._automatic_enabled()
+                    or not self._is_authorized(state, state.target_id)
+                ):
+                    return []
+                store = self._get_wakes()
+                data = store.read()
+                now = time.time()
+                hint = self._day_hints.get(state.target_id)
+                plan = data.get("dayplans", {}).get(state.target_id)
+                zone = plan["timezone"] if plan and plan["session"] == session else "UTC"
+                today = day_key(now, zone)
+                if hint and (
+                    hint["session"] != session
+                    or today <= hint["date"]
+                    or now - hint["at"] < 20 * 3600
+                ):
+                    return []
+                if hint is None and len(self._day_hints) >= 128:
+                    return []
+                self._day_hints[state.target_id] = {
+                    "session": session,
+                    "date": today,
+                    "at": now,
+                    "timezone": zone,
+                }
+                return [
+                    {
+                        "item_type": "SystemMessageItem",
+                        "meta": {
+                            "item_id": EPHEMERAL + "day-hint-" + uuid.uuid4().hex,
+                            "logical_turn_id": None,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": "今天若有想整理的想法、已知兴趣或未完话题，可按意愿用neko_proactive_dayplan安排2～4项；留空也正常。这是计划，不代表现实经历，不必为了日程凑事项。",
+                            }
+                        ],
+                    }
+                ]
+        except (ValueError, OSError):
+            return []
 
     async def _wake_prompt(self, kwargs):
         from .prompt_visibility import EPHEMERAL, route_scopes, task_record
@@ -1018,18 +1351,15 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     if not record or not record["wake"]:
                         continue
                     scope = record["scope"] or kwargs.get("session_id", "")
+                    targets = (
+                        set(data["slots"])
+                        | set(data.get("repeats", {}))
+                        | set(data.get("dayplans", {}))
+                    )
                     records = [
-                        *data["slots"].items(),
-                        *(
-                            (target, row["repeat_last"])
-                            for target, row in data["slots"].items()
-                            if row.get("repeat_last")
-                        ),
-                        *(
-                            (target, plan["last"])
-                            for target, plan in data.get("repeats", {}).items()
-                            if plan["last"]
-                        ),
+                        (target, row)
+                        for target in targets
+                        for row in self._wake_records(data, target)
                     ]
                     for target, row in records:
                         state = self._states.get((False, target))
@@ -1037,6 +1367,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             scope not in scopes
                             or row["session"] != scope
                             or row["id"] != record["wake"]
+                            or (row.get("batch_id") and row["batch_id"] != record["wake"])
                             or row["status"] not in ("unknown", "submitted")
                             or (row["task"] and row["task"] != record["task"])
                             or row["shown"]
@@ -1046,9 +1377,28 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             or not self._is_authorized(state, target)
                         ):
                             continue
-                        row["task"] = record["task"]
-                        row["shown"] = True
-                        row["planner_requested_at"] = time.time()
+                        batch = (
+                            [
+                                member
+                                for member in self._wake_records(data, target)
+                                if member.get("batch_id") == row["id"]
+                            ]
+                            if row.get("batch_id") == row["id"]
+                            else [row]
+                        )
+                        if not batch or any(
+                            member["shown"]
+                            or member["session"] != scope
+                            or member["status"] not in ("unknown", "submitted")
+                            or (member["task"] and member["task"] != record["task"])
+                            for member in batch
+                        ):
+                            continue
+                        requested_at = time.time()
+                        for member in batch:
+                            member["task"] = record["task"]
+                            member["shown"] = True
+                            member["planner_requested_at"] = requested_at
                         store.write(data)
                         return [
                             {
@@ -1067,7 +1417,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                                                 "session_id": scope,
                                                 "at": row["at"],
                                                 "timezone": row["timezone"],
-                                                "intent": row["intent"],
+                                                "intent": row["intent"]
+                                                if len(batch) == 1
+                                                else [member["intent"] for member in batch],
                                             },
                                             ensure_ascii=False,
                                         )

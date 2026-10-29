@@ -3,30 +3,32 @@
   "required_capabilities": ["custom_pages"],
   "workspace_title": "主动唤醒",
   "pages": [{
-    "id": "manage", "title": "主动唤醒管理", "description": "查看联系节奏，管理单次与重复醒来判断。",
+    "id": "manage", "title": "主动唤醒管理", "description": "查看联系节奏，管理单次、重复与今天关注的少量事项。",
     "placement": "sidebar", "icon": "list", "mode": "custom", "entry": "webui.html", "layout": "document",
     "queries": {"overview": {"api": "wake_overview", "parameters": {}}},
     "actions": {
       "save": {
         "api": "wake_edit", "confirmation": "保存或继续当前选中的私聊计划？保留已有防重间隔，到点仍由Planner判断。",
         "parameters": {
-          "action": {"type": "string", "required": true, "choices": ["single_save", "repeat_set", "repeat_resume"]},
+          "action": {"type": "string", "required": true, "choices": ["single_save", "repeat_set", "repeat_resume", "day_add", "day_update"]},
           "target": {"type": "string", "required": true, "max_length": 128},
           "session": {"type": "string", "required": true, "max_length": 128},
           "revision": {"type": "string", "required": true, "max_length": 64},
           "at": {"type": "string", "max_length": 64}, "when": {"type": "string", "max_length": 32},
           "timezone": {"type": "string", "max_length": 64}, "intent": {"type": "string", "max_length": 240},
           "kind": {"type": "string", "choices": ["interval", "daily"]},
-          "interval_minutes": {"type": "integer", "minimum": 0, "maximum": 10080}, "local_time": {"type": "string", "max_length": 5}
+          "interval_minutes": {"type": "integer", "minimum": 0, "maximum": 10080}, "local_time": {"type": "string", "max_length": 5},
+          "item_id": {"type": "string", "max_length": 32}, "version": {"type": "string", "max_length": 64}
         }
       },
       "cancel": {
         "api": "wake_edit", "confirmation": "确认取消、暂停或删除所选计划？已接收任务不会撤回，未知结果不会重放。",
         "parameters": {
-          "action": {"type": "string", "required": true, "choices": ["single_cancel", "repeat_pause", "repeat_delete"]},
+          "action": {"type": "string", "required": true, "choices": ["single_cancel", "repeat_pause", "repeat_delete", "day_cancel"]},
           "target": {"type": "string", "required": true, "max_length": 128},
           "session": {"type": "string", "required": true, "max_length": 128},
-          "revision": {"type": "string", "required": true, "max_length": 64}
+          "revision": {"type": "string", "required": true, "max_length": 64},
+          "item_id": {"type": "string", "max_length": 32}, "version": {"type": "string", "max_length": 64}
         }
       }
     }

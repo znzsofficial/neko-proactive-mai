@@ -35,8 +35,20 @@ REASONS = {
     "single_priority": "等待单次预约结束",
     "repeat_window_missed": "本次已跳过，等待下一轮",
     "repeat_deleted": "重复计划已删除",
+    "day_ended": "已跨天，旧事项不补执行",
+    "dayplan_priority": "临近当天事项，本次重复已跳过",
+    "day_merge_wait": "等待相近事项一起判断（最多60秒）",
 }
 ERRORS = {
+    "invalid_day_input": "日程字段无效：时刻/时区、240字以内依据和当前事项版本必须是有界文本",
+    "day_session_changed": "日程属于旧真实会话，不能借用其意图或额度",
+    "day_timezone_fixed": "日程时区已固定，请沿用当前日程时区",
+    "day_clock_reversed": "当前日期早于已保存日程，未重置额度",
+    "day_time_outside_today": "事项必须是该时区今天的未来时刻",
+    "day_unknown_retained": "保留的未知日程已达上限，未清除或重放旧事项",
+    "day_full": "今天最多6项，已取消和已尝试项仍计入额度",
+    "day_item_not_found": "没有找到当前私聊的这项日程",
+    "day_future_only": "只能修改或删除尚未到点、从未提交的今天事项",
     "wake_submission_inflight": "该私聊正在提交Host，稍后刷新核对；不会自动重试",
     "invalid_repeat": "选择固定间隔或每天，并填写联系依据",
     "invalid_repeat_interval": "间隔须为1～10080分钟",
@@ -79,8 +91,10 @@ def wall_instant(when, zone):
     return datetime.fromtimestamp(min(candidates), tz).isoformat()
 
 
-def wake_revision(target, session, row, repeat=None):
+def wake_revision(target, session, row, repeat=None, day=None):
     value = [target, session, row] if repeat is None else [target, session, row, repeat]
+    if day is not None:
+        value = [*value, day]
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -164,7 +178,17 @@ class WakeManagement:
         return {"session": sid, "name": name[:80] if text(name, 500) else "未命名聊天"}
 
     async def management_change(
-        self, action, target, session, revision, at="", zone="", intent="", *, repeat_fields=None
+        self,
+        action,
+        target,
+        session,
+        revision,
+        at="",
+        zone="",
+        intent="",
+        *,
+        repeat_fields=None,
+        day_fields=None,
     ):
         try:
             if (
@@ -194,12 +218,16 @@ class WakeManagement:
                         revision=revision,
                         partial=True,
                         repeat_fields=repeat_fields,
+                        day_fields=day_fields,
                     )
                     label = {
                         "repeat_set": "重复计划已保存",
                         "repeat_pause": "重复计划已暂停",
                         "repeat_resume": "重复计划从未来继续",
                         "repeat_delete": "重复计划已删除",
+                        "day_add": "今天事项已添加",
+                        "day_update": "今天事项已修改",
+                        "day_cancel": "未来事项已取消；不代表现实已完成",
                     }.get(action) or (
                         "已保存预约"
                         if action == "set"
@@ -224,6 +252,8 @@ class WakeManagement:
             raise ValueError(detail) from None
 
     async def management_snapshot(self):
+        from .dayplan import get_day
+
         async with asyncio.timeout(7):
             async with self._wake_lock:
                 data = self._get_wakes().read()
@@ -255,6 +285,7 @@ class WakeManagement:
                         state = None
                     row = None if group else data["slots"].get(target)
                     plan = None if group else data.get("repeats", {}).get(target)
+                    day = None if group else data.get("dayplans", {}).get(target)
                     if not group and stream:
                         current_private.add(target)
                     observation = self._observations.get((group, target), {})
@@ -272,9 +303,19 @@ class WakeManagement:
                         else 0
                     )
                     pending = row is not None and row["status"] in PENDING
+                    near_day = bool(
+                        day
+                        and day["session"] == (stream["session"] if stream else None)
+                        and any(
+                            r["status"] in PENDING and r["due"] <= now + 60
+                            for r in day["items"].values()
+                        )
+                    )
                     reason = (
                         "由预约接管"
                         if pending
+                        else "当天事项临近，优先检查"
+                        if near_day
                         else "由重复计划接管"
                         if plan and plan["enabled"]
                         else "插件或调度已关闭"
@@ -317,6 +358,16 @@ class WakeManagement:
                             row,
                             row.get("repeat_last") if row else None,
                             plan["last"] if plan else None,
+                            *(
+                                day["items"].values()
+                                if day and stream and day["session"] == stream["session"]
+                                else []
+                            ),
+                            *(
+                                day["retained"]
+                                if day and stream and day["session"] == stream["session"]
+                                else []
+                            ),
                         )
                         if r and r["attempted"]
                     ]
@@ -325,6 +376,21 @@ class WakeManagement:
                     )
                     planner_state = "尚无计划提交记录"
                     if latest_execution:
+                        if (
+                            latest_execution["attempted"]
+                            and (not row or latest_execution["attempted"] >= row["attempted"])
+                            and (not last or latest_execution["attempted"] >= last["at"])
+                        ):
+                            last_text = (
+                                local_time(latest_execution["attempted"])
+                                + " · "
+                                + STATUSES.get(
+                                    latest_execution.get(
+                                        "last_outcome", latest_execution["status"]
+                                    ),
+                                    "结果未知",
+                                )
+                            )
                         planner_state = (
                             "Planner请求已到达插件Hook · "
                             + local_time(latest_execution["planner_requested_at"])
@@ -371,6 +437,8 @@ class WakeManagement:
                             "state": reason,
                             "next": "由预约接管"
                             if pending
+                            else "当天事项临近，优先检查"
+                            if near_day
                             else "由重复计划接管"
                             if plan and plan["enabled"]
                             else local_time(self._next_regular_at)
@@ -416,7 +484,7 @@ class WakeManagement:
                             "chat": stream["name"] + " · " + target,
                             "target": target,
                             "session": stream["session"],
-                            "revision": wake_revision(target, stream["session"], row, plan),
+                            "revision": wake_revision(target, stream["session"], row, plan, day),
                             "at": active_row["at"] if active_row else "—",
                             "zone": active_row["timezone"] if active_row else "—",
                             "intent": active_row["intent"] if active_row else "—",
@@ -439,6 +507,7 @@ class WakeManagement:
                             else "—",
                             "last": last_text,
                             "planner_state": planner_state,
+                            "dayplan": get_day(data, target, stream["session"], now),
                             "plan_safety_until": local_time(self._target_guard(data, target))
                             if self._target_guard(data, target) > now
                             else "已满足60秒安全间距",
@@ -501,6 +570,17 @@ class WakeManagement:
                     }
                     for target in data.get("repeats", {})
                     if target not in current_private and target not in data["slots"]
+                )
+                hidden.extend(
+                    {
+                        "chat": "已撤权或失效日程目标 · " + target,
+                        "status": "已停止调度",
+                        "reason": "不展示旧意图；保留原记录",
+                    }
+                    for target in data.get("dayplans", {})
+                    if target not in current_private
+                    and target not in data["slots"]
+                    and target not in data.get("repeats", {})
                 )
                 return {
                     "base": base,
