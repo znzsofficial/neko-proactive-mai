@@ -12,7 +12,7 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from wake_store import CONTRACT, MAX_BYTES, MAX_TARGETS, WakeStore, parse_appointment
+from wake_store import CONTRACT, MAX_BYTES, MAX_TARGETS, parse_appointment
 from test_prompt_visibility import item, task
 
 ROOT = Path(__file__).parent
@@ -20,6 +20,7 @@ pkg = types.ModuleType("wake_test")
 pkg.__path__ = [str(ROOT)]
 sys.modules[pkg.__name__] = pkg
 mod = importlib.import_module("wake_test.plugin")
+WakeStore = mod.WakeStore
 NOW = 1793505600.0
 
 
@@ -89,6 +90,13 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.clock.stop)
 
     async def tool(self, action="get", **kwargs):
+        if action in ("cancel", "update") and "item_id" not in kwargs:
+            from wake_test.dayplan import item_version
+
+            rows = mod.singles(self.bot._get_wakes().read(), "friend")
+            pending = [r for r in rows if r["status"] in mod.PENDING]
+            if len(pending) == 1:
+                kwargs.update(item_id=pending[0]["id"], version=item_version(pending[0]))
         return await self.bot.private_wake(action, _host_context=self.host, **kwargs)
 
     async def reserve(self, delay=60, intent="续聊刚才未完的话题", **kwargs):
@@ -105,13 +113,20 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         self.clock_mock.return_value = NOW + delay
         await self.bot._run_wakes()
 
-    async def test_set_get_replace_cancel_are_single_slot_and_no_host_submission(self):
+    async def test_add_preserves_existing_and_cancel_is_item_scoped(self):
         first = await self.reserve()
         self.assertEqual((await self.tool())["wake"]["id"], first["id"])
         second = await self.reserve(120)
         self.assertNotEqual(first["id"], second["id"])
-        self.assertEqual(len(self.rows()), 1)
-        self.assertEqual((await self.tool("cancel"))["wake"]["status"], "cancelled")
+        self.assertEqual(len((await self.tool())["items"]), 2)
+        view = (await self.tool())["items"]
+        for it in view:
+            self.assertEqual(
+                (await self.tool("cancel", item_id=it["item_id"], version=it["version"]))["wake"][
+                    "status"
+                ],
+                "cancelled",
+            )
         await self.due(180)
         self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
 
@@ -390,7 +405,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(component["metadata"]["platforms"], ["qq"])
         self.assertEqual(
             {p["name"] for p in component["metadata"]["parameters"]},
-            {"action", "at", "intent"},
+            {"action", "at", "intent", "item_id", "version"},
         )
 
     async def test_config_reschedule_preserves_pending_and_cooldown_unload_cancels_inflight(self):
@@ -558,7 +573,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         data["slots"]["0"]["attempted"] = NOW - 1
         self.store.write(data)
-        self.store.set(data, "0", "session", iso(NOW + 120), "UTC", "updated", NOW)
+        self.store.set(
+            data,
+            "0",
+            "session",
+            iso(NOW + 120),
+            "UTC",
+            "updated",
+            NOW,
+            wake_id=data["slots"]["0"]["id"],
+        )
         self.assertEqual(self.store.read()["slots"]["0"]["attempted"], NOW - 1)
         self.assertLess(self.store.path.stat().st_size, MAX_BYTES)
         self.assertEqual(list(Path(self.directory.name).glob(".private-wakes-*")), [])

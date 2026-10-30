@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 
-from .wake_store import PENDING, text
+from .wake_store import PENDING, text, singles, selected_single, single_revision
 
 STATUSES = {
     "scheduled": "待唤醒",
@@ -44,6 +44,12 @@ REASONS = {
     "day_merge_wait": "等待相近事项一起判断（最多60秒）",
 }
 ERRORS = {
+    "simple_wake_time": REASONS["simple_wake_time"],
+    "simple_today_time": REASONS["simple_today_time"],
+    "simple_repeat_choice": REASONS["simple_repeat_choice"],
+    "single_identity_required": "先查看预约列表，选择一条预约及其当前版本后再修改或取消",
+    "single_not_found": "没有找到这条单次预约，请刷新列表",
+    "single_future_only": "只能修改未来尚未尝试的预约，或取消仍待执行的预约",
     "invalid_day_input": "日程字段无效：时刻/时区、240字以内依据和当前事项版本必须是有界文本",
     "day_session_changed": "日程属于旧真实会话，不能借用其意图或额度",
     "day_timezone_fixed": "日程时区已固定，请沿用当前日程时区",
@@ -193,6 +199,8 @@ class WakeManagement:
         *,
         repeat_fields=None,
         day_fields=None,
+        item_id="",
+        version="",
     ):
         try:
             if (
@@ -223,6 +231,8 @@ class WakeManagement:
                         partial=True,
                         repeat_fields=repeat_fields,
                         day_fields=day_fields,
+                        item_id=item_id,
+                        version=version,
                     )
                     label = {
                         "repeat_set": "重复计划已保存",
@@ -256,7 +266,7 @@ class WakeManagement:
             raise ValueError(detail) from None
 
     async def management_snapshot(self):
-        from .dayplan import get_day
+        from .dayplan import get_day, item_version
 
         async with asyncio.timeout(7):
             async with self._wake_lock:
@@ -287,7 +297,11 @@ class WakeManagement:
                     state = self._states.get((group, target))
                     if state and (not stream or state.stream_id != stream["session"]):
                         state = None
-                    row = None if group else data["slots"].get(target)
+                    row = (
+                        None
+                        if group
+                        else selected_single(data, target, stream["session"] if stream else None)
+                    )
                     plan = None if group else data.get("repeats", {}).get(target)
                     day = None if group else data.get("dayplans", {}).get(target)
                     if not group and stream:
@@ -354,7 +368,7 @@ class WakeManagement:
                     execution_rows = [
                         r
                         for r in (
-                            row,
+                            *singles(data, target),
                             row.get("repeat_last") if row else None,
                             plan["last"] if plan else None,
                             *(
@@ -477,7 +491,20 @@ class WakeManagement:
                             "chat": stream["name"] + " · " + target,
                             "target": target,
                             "session": stream["session"],
-                            "revision": wake_revision(target, stream["session"], row, plan, day),
+                            "revision": wake_revision(
+                                target, stream["session"], single_revision(data, target), plan, day
+                            ),
+                            "singles": [
+                                {
+                                    **r,
+                                    "item_id": r["id"],
+                                    "version": item_version(r),
+                                    "can_edit": r["status"] in PENDING and r["due"] > now,
+                                    "can_cancel": r["status"] in PENDING,
+                                }
+                                for r in sorted(singles(data, target), key=lambda r: r["due"])
+                                if r["session"] == stream["session"]
+                            ],
                             "at": active_row["at"] if active_row else "—",
                             "zone": active_row["timezone"] if active_row else "—",
                             "intent": active_row["intent"] if active_row else "—",
@@ -552,7 +579,8 @@ class WakeManagement:
                         else STATUSES[row["status"]],
                         "reason": "不展示旧意图；保留原记录",
                     }
-                    for target, row in data["slots"].items()
+                    for target in sorted(set(data["slots"]) | set(data.get("appointments", {})))
+                    for row in [selected_single(data, target)]
                     if target not in current_private
                 ]
                 hidden.extend(

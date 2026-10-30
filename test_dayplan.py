@@ -309,23 +309,19 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.plan()["date"], day.day_key(NOW, "UTC"))
         self.assertEqual(self.calls, [])
 
-    async def test_hint_optional_once_in_memory_request_only_no_store_upgrade_or_group_hint(self):
+    async def test_no_automatic_day_hint_in_normal_or_group_requests(self):
         raw = {"session_id": "session-friend", "items": [item("合成普通私聊")]}
-        first = await self.bot.filter_planner_tasks(**raw)
-        self.assertIn("留空也正常", json.dumps(first, ensure_ascii=False))
-        self.assertEqual(filter_request(first["modified_kwargs"])[0]["items"], raw["items"])
         self.assertIsNone(await self.bot.filter_planner_tasks(**raw))
         self.bot._wakes = None
         self.assertIsNone(await self.bot.filter_planner_tasks(**raw))
-        self.assertEqual(await self.bot._day_hint({**raw, "session_id": "session-g1"}), [])
-        self.assertEqual(await self.bot._day_hint({**raw, "session_id": ""}), [])
-        self.assertEqual(
-            await self.bot._day_hint({**raw, "items": [item(task(int(NOW * 1000)))]}), []
+        self.assertIsNone(
+            await self.bot.filter_planner_tasks(**{**raw, "session_id": "session-g1"})
         )
         self.assertEqual(self.calls, [])
         self.assertFalse(self.bot._get_wakes().path.exists())
         self.assertEqual(self.data()["version"], 1)
-        self.assertEqual(len(self.bot._day_hints), 1)
+        self.assertFalse(hasattr(self.bot, "_day_hints"))
+        self.assertFalse(hasattr(self.bot, "_day_hint"))
 
     async def test_admin_cas_future_only_and_no_hidden_repeat_or_single_mutation(self):
         selected = await self.selected()
@@ -576,7 +572,7 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(next(iter(self.plan()["items"].values()))["attempted"], NOW + 300)
 
-    async def test_optional_hint_is_bounded_and_does_not_upgrade_existing_v2(self):
+    async def test_normal_chat_does_not_inject_day_reminders_or_touch_existing_v2(self):
         selected = await self.selected()
         await self.bot.wake_edit(
             "repeat_set",
@@ -588,12 +584,12 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         )
         raw = self.bot._get_wakes().path.read_bytes()
         request = {"session_id": "session-friend", "items": [item("合成普通私聊")]}
-        self.assertTrue(await self.bot._day_hint(request))
+        self.assertIsNone(await self.bot.filter_planner_tasks(**request))
         self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
         self.assertEqual(self.data()["version"], 2)
         self.clock_mock.return_value = NOW + 86400
-        self.assertTrue(await self.bot._day_hint(request))
-        self.assertEqual(len(self.bot._day_hints), 1)
+        self.assertIsNone(await self.bot.filter_planner_tasks(**request))
+        self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
 
     async def test_midnight_during_host_lookup_expires_instead_of_late_submission(self):
         date = datetime.fromtimestamp(NOW, timezone.utc).date()

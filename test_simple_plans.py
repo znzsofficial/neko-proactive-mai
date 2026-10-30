@@ -64,7 +64,7 @@ class SimpleToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_sdk_exposes_small_parameter_sets_and_today_in_primary_description(self):
         components = {row["name"]: row["metadata"] for row in self.bot.get_components()}
         expected = {
-            "neko_proactive_wake": {"action", "at", "intent"},
+            "neko_proactive_wake": {"action", "at", "intent", "item_id", "version"},
             "neko_proactive_repeat": {"action", "interval_minutes", "local_time", "intent"},
             "neko_proactive_dayplan": {"action", "at", "intent", "item_id", "version"},
         }

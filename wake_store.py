@@ -17,6 +17,38 @@ PENDING = {"scheduled", "blocked"}
 STATUSES = PENDING | {"submitted", "rejected", "unknown", "expired", "cancelled", "revoked"}
 
 
+def singles(data, target):
+    """Legacy occurrence stays in place; v4 adds independently addressed rows."""
+    row = data["slots"].get(target)
+    return ([row] if row else []) + list(data.get("appointments", {}).get(target, {}).values())
+
+
+def all_singles(data):
+    return [
+        (target, row)
+        for target in sorted(set(data["slots"]) | set(data.get("appointments", {})))
+        for row in singles(data, target)
+    ]
+
+
+def selected_single(data, target, session=None):
+    rows = [r for r in singles(data, target) if session is None or r["session"] == session]
+    pending = [r for r in rows if r["status"] in PENDING]
+    return (
+        min(pending, key=lambda r: r["due"])
+        if pending
+        else max(rows, key=lambda r: r["attempted"], default=None)
+    )
+
+
+def single_revision(data, target):
+    return (
+        singles(data, target)
+        if data.get("appointments", {}).get(target)
+        else data["slots"].get(target)
+    )
+
+
 def text(value, limit, *, empty=False):
     return (
         isinstance(value, str)
@@ -98,7 +130,7 @@ class WakeStore:
         if (
             not isinstance(data, dict)
             or type(data.get("version")) is not int
-            or data.get("version") not in (1, 2, 3)
+            or data.get("version") not in (1, 2, 3, 4)
             or not number(data.get("last_dispatch"))
             or not isinstance(data.get("slots"), dict)
             or len(data["slots"]) > MAX_TARGETS
@@ -111,7 +143,7 @@ class WakeStore:
                 raise ValueError("invalid_wake_record")
         if data["version"] == 1 and "repeats" in data:
             raise ValueError("invalid_wake_index")
-        if data["version"] in (2, 3):
+        if data["version"] in (2, 3, 4):
             from .repeat import valid_plan
 
             repeats = data.get("repeats")
@@ -125,9 +157,9 @@ class WakeStore:
                 not text(target, 128) or not valid_plan(plan) for target, plan in repeats.items()
             ):
                 raise ValueError("invalid_repeat_record")
-        if data["version"] != 3 and "dayplans" in data:
+        if data["version"] < 3 and "dayplans" in data:
             raise ValueError("invalid_day_index")
-        if data["version"] == 3:
+        if data["version"] >= 3:
             from .dayplan import validate_day
 
             plans = data.get("dayplans")
@@ -140,6 +172,29 @@ class WakeStore:
                 not text(target, 128) or not validate_day(plan) for target, plan in plans.items()
             ):
                 raise ValueError("invalid_day_record")
+        if data["version"] < 4 and "appointments" in data:
+            raise ValueError("invalid_wake_index")
+        if data["version"] == 4:
+            extra = data.get("appointments")
+            if (
+                not isinstance(extra, dict)
+                or len(
+                    set(data["slots"]) | set(data["repeats"]) | set(data["dayplans"]) | set(extra)
+                )
+                > MAX_TARGETS
+            ):
+                raise ValueError("invalid_wake_index")
+            for target, rows in extra.items():
+                if (
+                    not text(target, 128)
+                    or not isinstance(rows, dict)
+                    or not rows
+                    or any(not valid_record(row) or key != row["id"] for key, row in rows.items())
+                ):
+                    raise ValueError("invalid_wake_record")
+                records = singles(data, target)
+                if len({r["id"] for r in records}) != len(records):
+                    raise ValueError("invalid_wake_record")
         return data
 
     def write(self, data):
@@ -148,7 +203,10 @@ class WakeStore:
         if (
             len(raw) > MAX_BYTES
             or len(
-                set(data["slots"]) | set(data.get("repeats", {})) | set(data.get("dayplans", {}))
+                set(data["slots"])
+                | set(data.get("repeats", {}))
+                | set(data.get("dayplans", {}))
+                | set(data.get("appointments", {}))
             )
             > MAX_TARGETS
         ):
@@ -175,7 +233,7 @@ class WakeStore:
     def recover(self, now):
         data = self.read()
         changed = False
-        for row in data["slots"].values():
+        for _, row in all_singles(data):
             if row["status"] in PENDING and row["due"] <= now:
                 row.update(status="expired", block="restart_missed")
                 changed = True
@@ -193,8 +251,9 @@ class WakeStore:
         if changed:
             self.write(data)
 
-    def set(self, data, target, session, at, zone, intent, now, *, keep_time=False):
-        old = data["slots"].get(target, {})
+    def set(self, data, target, session, at, zone, intent, now, *, keep_time=False, wake_id=""):
+        old = next((r for r in singles(data, target) if r["id"] == wake_id), {}) if wake_id else {}
+        previous = dict(old)
         if keep_time and (
             old.get("status") not in PENDING or old.get("session") != session or at != old["at"]
         ):
@@ -203,7 +262,7 @@ class WakeStore:
         if target not in data["slots"] and len(data["slots"]) >= MAX_TARGETS:
             raise ValueError("wake_index_full")
         row = {
-            "id": uuid.uuid4().hex,
+            "id": old["id"] if old else uuid.uuid4().hex,
             "session": session,
             "due": due,
             "at": normalized,
@@ -222,8 +281,18 @@ class WakeStore:
             row["guard"] = old["guard"]
         if "repeat_last" in old and old.get("session") == session:
             row["repeat_last"] = old["repeat_last"]
-        data["slots"][target] = row
+        if old:
+            old.clear()
+            old.update(row)
+            row = old
+        elif target not in data["slots"]:
+            data["slots"][target] = row
+        else:
+            data["version"] = 4
+            data.setdefault("repeats", {})
+            data.setdefault("dayplans", {})
+            data.setdefault("appointments", {}).setdefault(target, {})[row["id"]] = row
         if keep_time:
-            row.update(status=old["status"], retry=old["retry"], block=old["block"])
+            row.update(status=previous["status"], retry=previous["retry"], block=previous["block"])
         self.write(data)
         return row

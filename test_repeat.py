@@ -138,7 +138,12 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
         await self.tool("set", at=iso(NOW + 190), timezone="UTC", intent="新的单次")
         await self.due(190)
-        self.assertEqual(self.rows()["friend"]["status"], "submitted")
+        self.assertTrue(
+            any(
+                r["status"] == "submitted"
+                for r in fixtures.mod.singles(self.bot._get_wakes().read(), "friend")
+            )
+        )
 
     async def test_edit_paused_definition_does_not_implicitly_resume(self):
         await self.create(120)
@@ -326,7 +331,7 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         components = {c["name"]: c for c in self.bot.get_components()}
         for name in ("neko_proactive_wake", "neko_proactive_repeat"):
             metadata = components[name]["metadata"]
-            self.assertIn("醒来判断", metadata["description"])
+            self.assertIn("醒来思考", metadata["description"])
             self.assertIn("get", metadata["description"])
             self.assertNotIn("target", {p["name"] for p in metadata["parameters"]})
         self.assertIn("持续联系", components["neko_proactive_repeat"]["metadata"]["description"])

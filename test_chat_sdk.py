@@ -119,14 +119,20 @@ class ChatSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "待唤醒")
         self.assertTrue(self.bot._wake_event.is_set())
         self.assertEqual(self.bot._next_regular_at, NOW + 1800)
-        await self.bot.wake_save(**self.identity(row), intent="更新依据")
+        it = row["singles"][0]
+        await self.bot.wake_save(
+            **self.identity(row), item_id=it["item_id"], version=it["version"], intent="更新依据"
+        )
         self.assertEqual(self.rows()["friend"]["intent"], "更新依据")
         before = self.bot._get_wakes().path.read_bytes()
         self.bot._wake_event.clear()
         row = await self.selected()
         self.assertEqual(self.bot._get_wakes().path.read_bytes(), before)
         self.assertFalse(self.bot._wake_event.is_set())
-        await self.bot.wake_cancel(**self.identity(row))
+        it = row["singles"][0]
+        await self.bot.wake_cancel(
+            **self.identity(row), item_id=it["item_id"], version=it["version"]
+        )
         self.assertEqual(self.rows()["friend"]["status"], "cancelled")
         self.assertTrue(
             all(capability.startswith("chat.get_stream_by_") for capability, _ in self.rpc_calls)

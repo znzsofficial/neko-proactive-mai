@@ -66,6 +66,9 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def save(self, row=None, **kwargs):
         row = await self.selected() if row is None else row
+        active = next((it for it in row["singles"] if it["can_edit"]), None)
+        if active:
+            kwargs = {"item_id": active["item_id"], "version": active["version"], **kwargs}
         return await self.bot.wake_save(**self.identity(row), **kwargs)
 
     async def test_native_apis_are_private_and_page_has_only_management_actions(self):
@@ -121,7 +124,10 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         await self.save(at=iso(NOW + 180), timezone="UTC")
         self.assertEqual(self.rows()["friend"]["due"], NOW + 180)
         row = await self.selected()
-        await self.bot.wake_cancel(**self.identity(row))
+        it = row["singles"][0]
+        await self.bot.wake_cancel(
+            **self.identity(row), item_id=it["item_id"], version=it["version"]
+        )
         self.assertEqual((await self.tool())["wake"]["status"], "cancelled")
         self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
 
@@ -171,7 +177,10 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(row["cannot_cancel"])
             with self.assertRaisesRegex(ValueError, "关闭"):
                 await self.save(row, at=iso(NOW + 120), timezone="UTC", intent="依据")
-            await self.bot.wake_cancel(**self.identity(row))
+            it = row["singles"][0]
+            await self.bot.wake_cancel(
+                **self.identity(row), item_id=it["item_id"], version=it["version"]
+            )
             self.assertEqual(self.rows()["friend"]["status"], "cancelled")
             section.enabled = True
             await self.reserve()
@@ -232,7 +241,11 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         base = next(r for r in overview["base"] if r["kind"] == "私聊" and "friend" in r["chat"])
         self.assertEqual(base["state"], "临近计划，短暂避让")
         self.assertNotEqual(base["next"], "单次预约待执行，基础唤醒暂停")
-        await self.bot.wake_cancel(**self.identity(await self.selected()))
+        row = await self.selected()
+        it = row["singles"][0]
+        await self.bot.wake_cancel(
+            **self.identity(row), item_id=it["item_id"], version=it["version"]
+        )
         self.state.last_proactive_time = NOW
         self.bot.config.scheduler.isolation_time = 15
         self.bot._note_check(self.state, "isolation", last_message=NOW)
@@ -263,18 +276,26 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rows()["friend"]["status"], "unknown")
         self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
 
-    async def test_blocked_intent_only_edit_keeps_due_retry_status_and_guard(self):
+    async def test_due_blocked_edit_refused_without_changing_original(self):
         await self.reserve()
         data = self.bot._get_wakes().read()
         data["last_dispatch"] = NOW + 59
         self.bot._get_wakes().write(data)
         await self.due()
         before = self.rows()["friend"]
-        await self.save(intent="新的依据")
+        selected = await self.selected()
+        it = selected["singles"][0]
+        with self.assertRaises(ValueError):
+            await self.bot.wake_save(
+                **self.identity(selected),
+                item_id=it["item_id"],
+                version=it["version"],
+                intent="新的依据",
+            )
         after = self.rows()["friend"]
         for name in ("due", "retry", "status", "attempted", "block"):
             self.assertEqual(after[name], before[name])
-        self.assertEqual(after["intent"], "新的依据")
+        self.assertEqual(after["intent"], before["intent"])
 
     async def test_inactive_records_redact_old_intent_and_read_does_not_mark_them_revoked(self):
         await self.reserve(intent="私有旧意图")
