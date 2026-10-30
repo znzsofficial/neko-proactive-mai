@@ -31,7 +31,11 @@ REASONS = {
     "probability": "本轮概率未命中",
     "checking": "正在检查",
     "eligible": "本轮条件通过",
-    "appointment": "单次预约待执行，基础唤醒暂停",
+    "appointment": "正在检查计划",
+    "plan_spacing": "临近计划或60秒安全间距，稍后检查基础唤醒",
+    "simple_wake_time": "按北京时间填写10分钟后、21:30、明天09:00或日期时间，须为未来1分钟至7天",
+    "simple_today_time": "日程只能设今天北京时间的未来时刻：填HH:MM，至少1分钟后，不能设明天或已过时间",
+    "simple_repeat_choice": "间隔分钟与每天时刻二选一，如interval_minutes=120或local_time=21:00",
     "single_priority": "等待单次预约结束",
     "repeat_window_missed": "本次已跳过，等待下一轮",
     "repeat_deleted": "重复计划已删除",
@@ -294,7 +298,9 @@ class WakeManagement:
                     cooldown = max(
                         (state.last_proactive_time if state else 0)
                         + cfg.min_interval_between_chats * 60,
-                        self._target_guard(data, target) if not group else 0,
+                        max(self._target_guard(data, target), data["last_dispatch"] + 60)
+                        if not group
+                        else 0,
                     )
                     last_message = observation.get("last_message")
                     isolation = (
@@ -303,25 +309,18 @@ class WakeManagement:
                         else 0
                     )
                     pending = row is not None and row["status"] in PENDING
-                    near_day = bool(
-                        day
-                        and day["session"] == (stream["session"] if stream else None)
-                        and any(
-                            r["status"] in PENDING and r["due"] <= now + 60
-                            for r in day["items"].values()
-                        )
+                    near_plan = bool(
+                        stream
+                        and not group
+                        and self._near_plan(data, target, stream["session"], now)
                     )
                     reason = (
-                        "单次预约待执行，基础唤醒暂停"
-                        if pending
-                        else "当天事项临近，优先检查"
-                        if near_day
-                        else "重复计划已启用，基础唤醒暂停"
-                        if plan and plan["enabled"]
-                        else "插件或调度已关闭"
+                        "插件或调度已关闭"
                         if not enabled
                         else "真实会话未就绪"
                         if not stream
+                        else "临近计划，短暂避让"
+                        if near_plan
                         else "活动时段外"
                         if opening > now
                         else "最小间隔未到"
@@ -435,13 +434,7 @@ class WakeManagement:
                             + target,
                             "kind": "群聊" if group else "私聊",
                             "state": reason,
-                            "next": "单次预约待执行，基础唤醒暂停"
-                            if pending
-                            else "当天事项临近，优先检查"
-                            if near_day
-                            else "重复计划已启用，基础唤醒暂停"
-                            if plan and plan["enabled"]
-                            else local_time(self._next_regular_at)
+                            "next": local_time(self._next_regular_at)
                             if enabled and stream and self._next_regular_at
                             else "正在检查"
                             if enabled and stream

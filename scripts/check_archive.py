@@ -20,6 +20,7 @@ FILES = (
     "wake_store.py",
     "repeat.py",
     "dayplan.py",
+    "time_input.py",
     "webui.py",
     "webui.json",
     "webui.html",

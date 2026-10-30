@@ -52,24 +52,24 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plan()["current"]["due"], anchor + 240)
         self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
 
-    async def test_single_then_repeat_then_default_priority(self):
-        await self.create(1)
+    async def test_explicit_priority_does_not_disable_parallel_default(self):
+        await self.create(2)
         self.bot.config.scheduler.min_interval_between_chats = 0
         await self.reserve(180)
         await self.bot._check_and_trigger(self.state, "friend")
-        self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
-        await self.due(60)
+        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+        await self.due(120)
         self.assertEqual(self.plan()["current"]["block"], "single_priority")
         await self.due(180)
-        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+        self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
         await self.tool("cancel")
         await self.bot._check_and_trigger(self.state, "friend")
-        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
+        self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
         await self.rep("pause")
         self.clock_mock.return_value = NOW + 241
         self.state.last_proactive_time = 0  # Default path uses original wall datetime.
         await self.bot._check_and_trigger(self.state, "friend")
-        self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 2)
+        self.assertEqual(self.bot.ctx.maisaka.proactive.trigger.await_count, 3)
 
     async def test_each_outcome_consumes_occurrence_and_unknown_committed_before_rpc(self):
         self.bot.config.scheduler.min_interval_between_chats = 0

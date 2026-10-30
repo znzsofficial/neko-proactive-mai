@@ -224,14 +224,14 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.rows(), original)
                 self.assertIn("操作未完成", self.bot._management_operation)
 
-    async def test_pending_takeover_restores_real_default_deadline_after_cancel_and_cooldown_visible(
+    async def test_pending_plan_keeps_real_default_deadline_and_only_near_plan_defers(
         self,
     ):
         await self.reserve()
         overview = await self.bot.wake_overview()
         base = next(r for r in overview["base"] if r["kind"] == "私聊" and "friend" in r["chat"])
-        self.assertEqual(base["state"], "单次预约待执行，基础唤醒暂停")
-        self.assertEqual(base["next"], "单次预约待执行，基础唤醒暂停")
+        self.assertEqual(base["state"], "临近计划，短暂避让")
+        self.assertNotEqual(base["next"], "单次预约待执行，基础唤醒暂停")
         await self.bot.wake_cancel(**self.identity(await self.selected()))
         self.state.last_proactive_time = NOW
         self.bot.config.scheduler.isolation_time = 15

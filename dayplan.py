@@ -138,15 +138,15 @@ def get_day(data, target, session, now, zone=""):
     plan = data.get("dayplans", {}).get(target)
     if plan and plan["session"] != session:
         return {
-            "date": day_key(now, zone or "UTC"),
-            "timezone": zone or "UTC",
+            "date": day_key(now, zone or "Asia/Shanghai"),
+            "timezone": zone or "Asia/Shanghai",
             "items": [],
             "remaining": 0,
             "session_changed": True,
             "configured": True,
             "next_at": None,
         }
-    zone = plan["timezone"] if plan else zone or "UTC"
+    zone = plan["timezone"] if plan else zone or "Asia/Shanghai"
     today = day_key(now, zone)
     rows = []
     if plan:

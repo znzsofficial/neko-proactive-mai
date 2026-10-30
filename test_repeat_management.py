@@ -17,10 +17,10 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
     def test_management_copy_explains_pause_recovery_without_changing_schedule(self):
         document = Path(__file__).with_name("webui.html").read_text(encoding="utf-8")
         for wording in (
-            "单次预约待执行时，这条私聊暂停基础唤醒",
-            "启用期间由重复计划替代基础周期",
-            "暂停或删除后恢复基础周期",
-            "远期事项不暂停基础周期",
+            "单次预约不会暂停基础唤醒",
+            "重复计划与基础周期并行",
+            "只有临近计划时短暂避让",
+            "日程只能安排今天",
             "当前唤醒方式",
         ):
             self.assertIn(wording, document)
@@ -48,7 +48,7 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
         overview = await self.bot.wake_overview()
         self.assertEqual(
             next(r for r in overview["base"] if r["kind"] == "私聊")["state"],
-            "重复计划已启用，基础唤醒暂停",
+            "等待基础周期检查",
         )
         self.assertTrue((await self.edit("repeat_pause", row))["success"])
         self.assertFalse((await self.edit("repeat_resume", row))["success"])
@@ -62,7 +62,7 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
             next(r for r in (await self.bot.wake_overview())["base"] if r["kind"] == "私聊")[
                 "state"
             ],
-            "单次预约待执行，基础唤醒暂停",
+            "等待基础周期检查",
         )
         before = self.bot._get_wakes().path.read_bytes()
         await self.bot.wake_overview()

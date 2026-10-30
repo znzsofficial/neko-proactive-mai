@@ -115,13 +115,13 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         await self.due(180)
         self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
 
-    async def test_future_reservation_suppresses_default_but_other_private_and_group_still_run(
+    async def test_future_reservation_keeps_default_and_group_running_with_shared_spacing(
         self,
     ):
         await self.reserve(120)
         with patch.object(mod.random, "random", return_value=0):
             await self.bot._check_and_trigger(self.state, "friend")
-            self.bot.ctx.maisaka.proactive.trigger.assert_not_awaited()
+            self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
             await self.bot._check_and_trigger(self.bot._states[(False, "other")], "other")
             group = mod.ChatStreamState("session-group", "group", is_group=True)
             await self.bot._check_and_trigger(group, "group")
@@ -390,7 +390,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(component["metadata"]["platforms"], ["qq"])
         self.assertEqual(
             {p["name"] for p in component["metadata"]["parameters"]},
-            {"action", "at", "timezone", "intent"},
+            {"action", "at", "intent"},
         )
 
     async def test_config_reschedule_preserves_pending_and_cooldown_unload_cancels_inflight(self):
