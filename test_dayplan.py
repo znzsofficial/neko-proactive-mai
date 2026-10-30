@@ -319,7 +319,7 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.calls, [])
         self.assertFalse(self.bot._get_wakes().path.exists())
-        self.assertEqual(self.data()["version"], 1)
+        self.assertEqual(self.data()["version"], 4)
         self.assertFalse(hasattr(self.bot, "_day_hints"))
         self.assertFalse(hasattr(self.bot, "_day_hint"))
 
@@ -586,7 +586,7 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         request = {"session_id": "session-friend", "items": [item("合成普通私聊")]}
         self.assertIsNone(await self.bot.filter_planner_tasks(**request))
         self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
-        self.assertEqual(self.data()["version"], 2)
+        self.assertEqual(self.data()["version"], 4)
         self.clock_mock.return_value = NOW + 86400
         self.assertIsNone(await self.bot.filter_planner_tasks(**request))
         self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
@@ -696,7 +696,14 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
 class DayCalendarTests(unittest.TestCase):
     def test_dst_absolute_offsets_are_explicit_and_missing_wall_time_rejected(self):
         now = datetime(2026, 11, 1, 4, tzinfo=timezone.utc).timestamp()
-        data = {"version": 1, "last_dispatch": 0, "slots": {}}
+        data = {
+            "version": 4,
+            "last_dispatch": 0,
+            "slots": {},
+            "appointments": {},
+            "repeats": {},
+            "dayplans": {},
+        }
         a = day.change_day(
             data,
             "friend",
@@ -721,7 +728,7 @@ class DayCalendarTests(unittest.TestCase):
         spring = datetime(2026, 3, 8, 5, tzinfo=timezone.utc).timestamp()
         with self.assertRaises(ValueError):
             day.change_day(
-                {"version": 1, "slots": {}},
+                {"version": 4, "slots": {}, "appointments": {}, "repeats": {}, "dayplans": {}},
                 "friend",
                 "session",
                 spring,

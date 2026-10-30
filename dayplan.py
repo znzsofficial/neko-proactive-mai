@@ -241,9 +241,7 @@ def change_day(
         row = occurrence({"session": session, "timezone": zone, "intent": intent.strip()}, due)
         row["at"] = normalized
         plan["items"][row["id"]] = row
-        data["version"] = max(data["version"], 3)
-        data.setdefault("repeats", {})
-        data.setdefault("dayplans", {})[target] = plan
+        data["dayplans"][target] = plan
         return row
     if action not in ("day_update", "day_cancel") or not plan or item_id not in plan["items"]:
         raise ValueError("day_item_not_found")

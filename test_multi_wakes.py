@@ -30,6 +30,27 @@ class MultiWakeTests(unittest.IsolatedAsyncioTestCase):
     def data(self):
         return self.bot._get_wakes().read()
 
+    async def test_only_v4_is_supported_old_formats_are_never_auto_migrated(self):
+        store = self.bot._get_wakes()
+        self.assertEqual(store.read()["version"], 4)
+        self.assertFalse(store.path.exists())
+        for version in (1, 2, 3, 5):
+            data = {
+                "version": version,
+                "last_dispatch": 0,
+                "slots": {},
+                "appointments": {},
+                "repeats": {},
+                "dayplans": {},
+            }
+            store.path.write_text(json.dumps(data), encoding="utf-8")
+            before = store.path.read_bytes()
+            with self.assertRaises(ValueError):
+                store.recover(NOW)
+            with self.assertRaises(ValueError):
+                store.write({**data, "version": 4})
+            self.assertEqual(store.path.read_bytes(), before)
+
     async def change(self, action, it, **fields):
         return await self.bot.private_wake(
             action, item_id=it["item_id"], version=it["version"], _host_context=self.host, **fields

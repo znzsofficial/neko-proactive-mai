@@ -229,7 +229,7 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         await self.create(2)
         self.assertEqual(self.rows(), before)
         data = self.bot._get_wakes().read()
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], 4)
         # Pinned v2.5.1's admission contract is version == 1. A separate delivery
         # probe executes that actual historical reader; CI needs no git history.
         self.assertNotEqual(data["version"], 1)

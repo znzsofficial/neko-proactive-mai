@@ -194,8 +194,7 @@ def set_plan(
     plan["current"] = occurrence(plan, next_due(plan, now))
     if old and "last_skip" in old:
         plan["last_skip"] = old["last_skip"]
-    data["version"] = max(data["version"], 2)
-    data.setdefault("repeats", {})[target] = plan
+    data["repeats"][target] = plan
     return plan
 
 
